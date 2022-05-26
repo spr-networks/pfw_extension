@@ -380,6 +380,17 @@ func handleVariable(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), 400)
 			return
 		}
+
+		switch value.(type) {
+		case string:
+		case float64:
+		case bool:
+		default:
+			vType := fmt.Sprintf("%T", value)
+			http.Error(w, "Invalid type: " + vType + ". Only strings and numbers are supported", 400)
+			return
+		}
+
 		gFirewallConfig.Variables[name] = value
 		saveFirewallRulesLocked()
 	}
@@ -405,6 +416,9 @@ func testExpression(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+
+	loadFirewallRules()
+
 	unix_plugin_router := mux.NewRouter().StrictSlash(true)
 
 	unix_plugin_router.HandleFunc("/config", getPFWConfig).Methods("GET")
