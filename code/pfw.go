@@ -26,8 +26,14 @@ var UNIX_PLUGIN_LISTENER = TEST_PREFIX + "/state/plugins/pfw/socket"
 
 var FWmtx sync.RWMutex
 
-type BlockRule struct {
+type ClientIdentifier struct {
+	Identity  string
+	Group     string
 	SrcIP     string
+}
+
+type BlockRule struct {
+	Client 		ClientIdentifier
 	DstIP     string
 	DstPort   string
 	Protocol  string
@@ -36,7 +42,7 @@ type BlockRule struct {
 }
 
 type ForwardingRule struct {
-	SrcIP     string
+	Client		ClientIdentifier
 	DstIP     string
 	SrcPort   string
 	Protocol  string
@@ -56,9 +62,6 @@ type FirewallConfig struct {
 var FirewallConfigFile = TEST_PREFIX + "/configs/pfw/rules.json"
 var gFirewallConfig = FirewallConfig{[]ForwardingRule{}, []BlockRule{}, map[string]interface{}{}}
 
-func pluginTest(w http.ResponseWriter, r *http.Request) {
-	http.Error(w, "Not implemented", 400)
-}
 
 func logRequest(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -100,9 +103,61 @@ func loadFirewallRules() error {
 var blockVerdict = "goto PFWDROPLOG"
 var blockVmapName = "fwd_block"
 
-func isBlockInstalled(br BlockRule) bool {
+func validateClientIdentifier(client ClientIdentifier) error {
+
+	count := 0
+	if client.Group != "" {
+		count += 1
+	}
+	if client.Identity != "" {
+		count += 1
+	}
+	if client.SrcIP != "" {
+		count += 1
+	}
+	if count != 1 {
+		return fmt.Errorf("One parameter is required for the ClientIdentifier")
+	}
+
+
+	if client.SrcIP != "" {
+		if CIDRorIP(client.SrcIP) != nil {
+			return fmt.Errorf("Invalid SrcIP")
+		}
+	}
+
+	if client.Identity != "" {
+		//check that the identity is in the device
+	}
+
+	if client.Group != "" {
+		//check that the group is in the device
+	}
+
+	return nil
+}
+
+func clientIPs(client ClientIdentifier) []string {
+	//return a list of IPs from a ClientIdentifier
+	if client.SrcIP != "" {
+		return []string{client.SrcIP}
+	}
+
+	if client.Identity != "" {
+		//look up last recent ip for the rule
+	}
+
+	if client.Group != "" {
+		//ips := []string{}
+		//for each device in the group, get the recent ip and return those
+	}
+
+	return []string{}
+}
+
+func isBlockInstalled(br BlockRule, clientIP string) bool {
 	cmd := exec.Command("nft", "get", "element", "inet", "nat", blockVmapName, "{",
-		br.SrcIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", blockVerdict, "}")
+		clientIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", blockVerdict, "}")
 
 	err := cmd.Run()
 
@@ -113,9 +168,9 @@ func isBlockInstalled(br BlockRule) bool {
 	}
 }
 
-func addBlock(br BlockRule) error {
+func addBlock(br BlockRule, clientIP string) error {
 	cmd := exec.Command("nft", "add", "element", "inet", "nat", blockVmapName, "{",
-		br.SrcIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", blockVerdict, "}")
+		clientIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", blockVerdict, "}")
 
 	_, err := cmd.Output()
 
@@ -126,9 +181,9 @@ func addBlock(br BlockRule) error {
 	return err
 }
 
-func deleteBlock(br BlockRule) error {
+func deleteBlock(br BlockRule, clientIP string) error {
 	cmd := exec.Command("nft", "delete", "element", "inet", "nat", blockVmapName, "{",
-		br.SrcIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", blockVerdict, "}")
+		clientIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", blockVerdict, "}")
 
 	_, err := cmd.Output()
 
@@ -141,16 +196,16 @@ func deleteBlock(br BlockRule) error {
 }
 
 
-func isForwardingInstalled(fw ForwardingRule) bool {
+func isForwardingInstalled(fw ForwardingRule, clientIP string) bool {
 	return false
 }
 
-func deleteForwarding(f ForwardingRule) error {
+func deleteForwarding(f ForwardingRule, clientIP string) error {
 	//not impl yet
 	return nil
 }
 
-func addForwarding(f ForwardingRule) error {
+func addForwarding(f ForwardingRule, clientIP string) error {
 	//not impl yet
 	return nil
 }
@@ -194,21 +249,27 @@ func applyFirewallRulesLocked() {
 
 	//forwarding rules
 	for _, fw := range gFirewallConfig.ForwardingRules {
-		is_installed := isForwardingInstalled(fw)
-		if ruleActive(fw.Condition, fw.CronExpr) && !is_installed {
-			addForwarding(fw)
-		} else if is_installed {
-			deleteForwarding(fw)
+		for _, clientIP := range(clientIPs(fw.Client)) {
+
+			is_installed := isForwardingInstalled(fw, clientIP)
+			if ruleActive(fw.Condition, fw.CronExpr) && !is_installed {
+				addForwarding(fw, clientIP)
+			} else if is_installed {
+				deleteForwarding(fw, clientIP)
+			}
+
 		}
 	}
 
 	//block rules
 	for _, br := range gFirewallConfig.BlockRules {
-		is_installed := isBlockInstalled(br)
-		if ruleActive(br.Condition, br.CronExpr) && !is_installed {
-			addBlock(br)
-		} else if is_installed {
-			deleteBlock(br)
+		for _, clientIP := range(clientIPs(br.Client)) {
+			is_installed := isBlockInstalled(br, clientIP)
+			if ruleActive(br.Condition, br.CronExpr) && !is_installed {
+				addBlock(br, clientIP)
+			} else if is_installed {
+				deleteBlock(br, clientIP)
+			}
 		}
 	}
 }
@@ -266,8 +327,9 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if CIDRorIP(fwd.SrcIP) != nil {
-		http.Error(w, "Invalid SrcIP", 400)
+	err = validateClientIdentifier(fwd.Client)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
 		return
 	}
 
@@ -318,12 +380,13 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if CIDRorIP(br.SrcIP) != nil {
-		http.Error(w, "Invalid SrcIP", 400)
+	err = validateClientIdentifier(br.Client)
+	if err != nil {
+		http.Error(w, err.Error(), 400)
 		return
 	}
 
-	if CIDRorIP(br.SrcIP) != nil {
+	if CIDRorIP(br.DstIP) != nil {
 		http.Error(w, "Invalid DstIP", 400)
 		return
 	}
