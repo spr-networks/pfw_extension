@@ -16,46 +16,45 @@ import (
 )
 
 import (
-	"github.com/gorilla/mux"
 	"github.com/PaesslerAG/gval"
+	cronexpr "github.com/adhocore/gronx"
+	"github.com/gorilla/mux"
 )
 
 var TEST_PREFIX = os.Getenv("TEST_PREFIX")
 var UNIX_PLUGIN_LISTENER = TEST_PREFIX + "/state/plugins/pfw/socket"
 
-var FWmtx sync.Mutex
+var FWmtx sync.RWMutex
 
 type BlockRule struct {
 	SrcIP     string
 	DstIP     string
-	SrcPort		string
+	DstPort   string
 	Protocol  string
 	CronExpr  string
 	Condition string
-	Duration  string
 }
 
 type ForwardingRule struct {
 	SrcIP     string
 	DstIP     string
-	SrcPort		string
+	SrcPort   string
 	Protocol  string
 	CronExpr  string
 	Condition string
-	Duration  string
 
-	NewDstIP	string
-	DstPort		string
+	NewDstIP string
+	DstPort  string
 }
 
 type FirewallConfig struct {
 	ForwardingRules []ForwardingRule
 	BlockRules      []BlockRule
-	Variables				map[string]interface{}
+	Variables       map[string]interface{}
 }
 
 var FirewallConfigFile = TEST_PREFIX + "/configs/pfw/rules.json"
-var gFirewallConfig = FirewallConfig{[]ForwardingRule{}, []BlockRule{}, map[string]interface{}{} }
+var gFirewallConfig = FirewallConfig{[]ForwardingRule{}, []BlockRule{}, map[string]interface{}{}}
 
 func pluginTest(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "Not implemented", 400)
@@ -68,15 +67,12 @@ func logRequest(handler http.Handler) http.Handler {
 	})
 }
 
-
 func getPFWConfig(w http.ResponseWriter, r *http.Request) {
-	FWmtx.Lock()
-	defer FWmtx.Unlock()
+	FWmtx.RLock()
+	defer FWmtx.RUnlock()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(gFirewallConfig)
 }
-
-
 
 func saveFirewallRulesLocked() {
 	file, _ := json.MarshalIndent(gFirewallConfig, "", " ")
@@ -87,8 +83,8 @@ func saveFirewallRulesLocked() {
 }
 
 func loadFirewallRules() error {
-	FWmtx.Lock()
-	defer FWmtx.Unlock()
+	FWmtx.RLock()
+	defer FWmtx.RUnlock()
 	data, err := ioutil.ReadFile(FirewallConfigFile)
 	if err != nil {
 		return err
@@ -101,9 +97,21 @@ func loadFirewallRules() error {
 	return nil
 }
 
+func addBlock(br BlockRule) error {
+	cmd := exec.Command("nft", "add", "element", "inet", "nat", "fwd_block", "{",
+		br.SrcIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", "goto PFWDROPLOG", "}")
+
+	_, err := cmd.Output()
+
+	if err != nil {
+		fmt.Println("failed to add element", err)
+		fmt.Println(cmd)
+	}
+	return err
+}
 func deleteBlock(br BlockRule) error {
-	cmd := exec.Command("nft", "add", "element", "inet", "nat", "block", "{",
-		br.SrcIP, ".", br.DstIP, ".", br.Protocol, ":", "drop", "}")
+	cmd := exec.Command("nft", "add", "element", "inet", "nat", "fwd_block", "{",
+		br.SrcIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", "goto PFWDROPLOG", "}")
 
 	_, err := cmd.Output()
 
@@ -116,120 +124,78 @@ func deleteBlock(br BlockRule) error {
 }
 
 func deleteForwarding(f ForwardingRule) error {
-	var cmd *exec.Cmd
-	if f.SrcPort == "any" {
-		cmd = exec.Command("nft", "delete", "element", "inet", "nat", f.Protocol+"anyfwd",
-			"{", f.SrcIP, ":",
-			f.DstIP, "}")
-
-	} else {
-		cmd = exec.Command("nft", "delete", "element", "inet", "nat", f.Protocol+"fwd",
-			"{", f.SrcIP, ".", f.SrcPort, ":",
-			f.DstIP, ".", f.DstPort, "}")
-	}
-	_, err := cmd.Output()
-
-	if err != nil {
-		fmt.Println("failed to delete element", err)
-		fmt.Println(cmd)
-	}
-
-	return err
-
-}
-
-func applyForwarding(forwarding []ForwardingRule) error {
-
-	//need to flush the fwd rules here ?
-
-	for _, f := range forwarding {
-		var cmd *exec.Cmd
-		if f.SrcPort == "any" {
-			cmd = exec.Command("nft", "add", "element", "inet", "nat", f.Protocol+"anyfwd",
-				"{", f.SrcIP, ":",
-				f.DstIP, "}")
-
-		} else {
-			cmd = exec.Command("nft", "add", "element", "inet", "nat", f.Protocol+"fwd",
-				"{", f.SrcIP, ".", f.SrcPort, ":",
-				f.DstIP, ".", f.DstPort, "}")
-		}
-		_, err := cmd.Output()
-
-		if err != nil {
-			fmt.Println("failed to add element", err)
-			fmt.Println(cmd)
-		}
-
-	}
-
+	//not impl yet
 	return nil
 }
 
-func applyBlocking(blockRules []BlockRule) error {
-	for _, br := range blockRules {
-		cmd := exec.Command("nft", "add", "element", "inet", "nat", "block", "{",
-			br.SrcIP, ".", br.DstIP, ".", br.Protocol, ":", "drop", "}")
+func addForwarding(f ForwardingRule) error {
+	//not impl yet
+	return nil
+}
 
-		_, err := cmd.Output()
+func ruleActive(condition string, cron string) bool {
+	cronChecker := cronexpr.New()
 
+	//check if time is active
+	if cron != "" {
+		if !cronChecker.IsValid(cron) {
+			fmt.Println("Invalid cron expression", cron)
+			return false
+		}
+
+		val, err := cronChecker.IsDue(cron)
 		if err != nil {
-			fmt.Println("failed to add element", err)
-			fmt.Println(cmd)
+			fmt.Println("Invalid cron expression", err.Error())
+			return false
+		}
+
+		if val == false {
+			return false
 		}
 	}
 
-	return nil
+	if condition != "" {
+		value, err := gval.Evaluate(condition, gFirewallConfig.Variables)
+		if err != nil {
+			fmt.Println("invalid rule", err)
+			return false
+		}
+		if value == false {
+			return false
+		}
+	}
+
+	return true
 }
 
 func applyFirewallRulesLocked() {
 
-	applyForwarding(gFirewallConfig.ForwardingRules)
+	//forwarding rules
+	for _, fw := range gFirewallConfig.ForwardingRules {
+		if ruleActive(fw.Condition, fw.CronExpr) {
+			addForwarding(fw)
+		} else {
+			deleteForwarding(fw)
+		}
+	}
 
-	applyBlocking(gFirewallConfig.BlockRules)
+	//block rules
+	for _, br := range gFirewallConfig.BlockRules {
+		if ruleActive(br.Condition, br.CronExpr) {
+			addBlock(br)
+		} else {
+			deleteBlock(br)
+		}
+	}
 }
 
 func initUserFirewallRules() {
 	loadFirewallRules()
 
-	FWmtx.Lock()
-	defer FWmtx.Unlock()
+	FWmtx.RLock()
+	defer FWmtx.RUnlock()
 
 	applyFirewallRulesLocked()
-
-	x := func() {
-		//TBD expose upstream_tcp_port_drop nfmap to UI for toggling
-		enable_upstream := os.Getenv("UPSTREAM_SERVICES_ENABLE")
-		if enable_upstream != "" {
-			cmd := exec.Command("nft", "flush", "map", "inet", "filter", "upstream_tcp_port_drop")
-			_, err := cmd.Output()
-
-			if err != nil {
-				fmt.Println("Failed to disable", err)
-				fmt.Println(cmd)
-			}
-		}
-	}
-
-	// Workaround for docker-compose, which may start api very shortly
-	// after base is started, but before the rules are loaded.
-
-	//run immediately
-	x()
-
-	//and also in 10 seconds
-	go func() {
-		time.Sleep(10 * time.Second)
-		x()
-	}()
-
-}
-
-func getFirewallConfig(w http.ResponseWriter, r *http.Request) {
-	FWmtx.Lock()
-	defer FWmtx.Unlock()
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(gFirewallConfig)
 }
 
 func CIDRorIP(IP string) error {
@@ -261,7 +227,7 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	re := regexp.MustCompile("^[0-9\\-]*$")
+	re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
 
 	if fwd.SrcPort != "any" && !re.MatchString(fwd.SrcPort) {
 		http.Error(w, "Invalid SrcPort", 400)
@@ -293,7 +259,6 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 			if fwd == a {
 				gFirewallConfig.ForwardingRules = append(gFirewallConfig.ForwardingRules[:i], gFirewallConfig.ForwardingRules[i+1:]...)
 				saveFirewallRulesLocked()
-				deleteForwarding(a)
 				return
 			}
 		}
@@ -303,7 +268,6 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 
 	gFirewallConfig.ForwardingRules = append(gFirewallConfig.ForwardingRules, fwd)
 	saveFirewallRulesLocked()
-	applyFirewallRulesLocked()
 }
 
 func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
@@ -319,6 +283,14 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 
 	if br.Protocol != "tcp" && br.Protocol != "udp" {
 		http.Error(w, err.Error(), 400)
+		return
+	}
+
+	//this would accept -1 etc, which is invalid
+	re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
+
+	if !re.MatchString(br.DstPort) {
+		http.Error(w, "Invalid SrcPort", 400)
 		return
 	}
 
@@ -338,7 +310,6 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 			if br == a {
 				gFirewallConfig.BlockRules = append(gFirewallConfig.BlockRules[:i], gFirewallConfig.BlockRules[i+1:]...)
 				saveFirewallRulesLocked()
-				deleteBlock(a)
 				return
 			}
 		}
@@ -348,7 +319,6 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 
 	gFirewallConfig.BlockRules = append(gFirewallConfig.BlockRules, br)
 	saveFirewallRulesLocked()
-	applyFirewallRulesLocked()
 }
 
 func handleVariable(w http.ResponseWriter, r *http.Request) {
@@ -387,7 +357,7 @@ func handleVariable(w http.ResponseWriter, r *http.Request) {
 		case bool:
 		default:
 			vType := fmt.Sprintf("%T", value)
-			http.Error(w, "Invalid type: " + vType + ". Only strings and numbers are supported", 400)
+			http.Error(w, "Invalid type: "+vType+". Only strings and numbers are supported", 400)
 			return
 		}
 
@@ -397,8 +367,8 @@ func handleVariable(w http.ResponseWriter, r *http.Request) {
 }
 
 func testExpression(w http.ResponseWriter, r *http.Request) {
-	FWmtx.Lock()
-	defer FWmtx.Unlock()
+	FWmtx.RLock()
+	defer FWmtx.RUnlock()
 
 	body, err := ioutil.ReadAll(r.Body)
 	if err != nil {
@@ -415,10 +385,55 @@ func testExpression(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(value)
 }
 
-func main() {
+func ruleTimer() {
+
+	runTimer := func() {
+		ticker := time.NewTicker(1 * time.Second)
+		for {
+			select {
+			case <-ticker.C:
+				//every 1s check the firewall rules
+				FWmtx.RLock()
+				applyFirewallRulesLocked()
+				FWmtx.RUnlock()
+			}
+		}
+	}
+
+	go runTimer()
+}
+
+func initPFW() {
+
+	/*
+			inet filter
+
+		  map fwd_block {
+		    type ipv4_addr . ipv4_addr . inet_proto . inet_service : verdict;
+		    flags interval
+		  }
+
+			chain PFWDROPLOG {
+				counter log prefix "DRP:PFW "
+				counter drop
+			}
+
+			-> after clamping we want these rules. we could add a jump to PFW chain
+			# MSS clamping to handle upstream MTU limitations
+			tcp flags syn tcp option maxseg size set rt mtu
+
+			mb jump
+			counter ip saddr . ip daddr . ip protocol . tcp dport vmap @fwd_block
+			counter ip saddr . ip daddr . ip protocol . udp dport vmap @fwd_block
+
+			//goto PFWDROPLOG
+	*/
 
 	loadFirewallRules()
+	ruleTimer()
+}
 
+func main() {
 	unix_plugin_router := mux.NewRouter().StrictSlash(true)
 
 	unix_plugin_router.HandleFunc("/config", getPFWConfig).Methods("GET")
@@ -434,6 +449,8 @@ func main() {
 	}
 
 	pluginServer := http.Server{Handler: logRequest(unix_plugin_router)}
+
+	initPFW()
 
 	pluginServer.Serve(unixPluginListener)
 }
