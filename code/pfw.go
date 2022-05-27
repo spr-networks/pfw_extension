@@ -97,9 +97,25 @@ func loadFirewallRules() error {
 	return nil
 }
 
+var blockVerdict = "goto PFWDROPLOG"
+var blockVmapName = "fwd_block"
+
+func isBlockInstalled(br BlockRule) bool {
+	cmd := exec.Command("nft", "get", "element", "inet", "nat", blockVmapName, "{",
+		br.SrcIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", blockVerdict, "}")
+
+	err := cmd.Run()
+
+	if err != nil {
+		return false
+	} else {
+		return true
+	}
+}
+
 func addBlock(br BlockRule) error {
-	cmd := exec.Command("nft", "add", "element", "inet", "nat", "fwd_block", "{",
-		br.SrcIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", "goto PFWDROPLOG", "}")
+	cmd := exec.Command("nft", "add", "element", "inet", "nat", blockVmapName, "{",
+		br.SrcIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", blockVerdict, "}")
 
 	_, err := cmd.Output()
 
@@ -109,9 +125,10 @@ func addBlock(br BlockRule) error {
 	}
 	return err
 }
+
 func deleteBlock(br BlockRule) error {
-	cmd := exec.Command("nft", "delete", "element", "inet", "nat", "fwd_block", "{",
-		br.SrcIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", "goto PFWDROPLOG", "}")
+	cmd := exec.Command("nft", "delete", "element", "inet", "nat", blockVmapName, "{",
+		br.SrcIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", blockVerdict, "}")
 
 	_, err := cmd.Output()
 
@@ -121,6 +138,11 @@ func deleteBlock(br BlockRule) error {
 	}
 
 	return err
+}
+
+
+func isForwardingInstalled(fw ForwardingRule) bool {
+	return false
 }
 
 func deleteForwarding(f ForwardingRule) error {
@@ -172,18 +194,20 @@ func applyFirewallRulesLocked() {
 
 	//forwarding rules
 	for _, fw := range gFirewallConfig.ForwardingRules {
-		if ruleActive(fw.Condition, fw.CronExpr) {
+		is_installed := isForwardingInstalled(fw)
+		if ruleActive(fw.Condition, fw.CronExpr) && !is_installed {
 			addForwarding(fw)
-		} else {
+		} else if is_installed {
 			deleteForwarding(fw)
 		}
 	}
 
 	//block rules
 	for _, br := range gFirewallConfig.BlockRules {
-		if ruleActive(br.Condition, br.CronExpr) {
+		is_installed := isBlockInstalled(br)
+		if ruleActive(br.Condition, br.CronExpr) && !is_installed {
 			addBlock(br)
-		} else {
+		} else if is_installed {
 			deleteBlock(br)
 		}
 	}
