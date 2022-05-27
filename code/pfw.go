@@ -110,7 +110,7 @@ func addBlock(br BlockRule) error {
 	return err
 }
 func deleteBlock(br BlockRule) error {
-	cmd := exec.Command("nft", "add", "element", "inet", "nat", "fwd_block", "{",
+	cmd := exec.Command("nft", "delete", "element", "inet", "nat", "fwd_block", "{",
 		br.SrcIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", "goto PFWDROPLOG", "}")
 
 	_, err := cmd.Output()
