@@ -282,7 +282,7 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if br.Protocol != "tcp" && br.Protocol != "udp" {
-		http.Error(w, err.Error(), 400)
+		http.Error(w, "invalid protocol", 400)
 		return
 	}
 
