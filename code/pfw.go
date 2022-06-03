@@ -21,6 +21,7 @@ import (
 
 var TEST_PREFIX = os.Getenv("TEST_PREFIX")
 var UNIX_PLUGIN_LISTENER = TEST_PREFIX + "/state/plugins/pfw/socket"
+var FirewallConfigFile = TEST_PREFIX + "/configs/pfw/rules.json"
 
 var FWmtx sync.RWMutex
 
@@ -66,10 +67,10 @@ type FirewallConfig struct {
 	ForwardingRules []ForwardingRule
 	BlockRules      []BlockRule
 	Variables       map[string]interface{}
+	APIToken        string
 }
 
-var FirewallConfigFile = TEST_PREFIX + "/configs/pfw/rules.json"
-var gFirewallConfig = FirewallConfig{[]ForwardingRule{}, []BlockRule{}, map[string]interface{}{}}
+var gFirewallConfig = FirewallConfig{[]ForwardingRule{}, []BlockRule{}, map[string]interface{}{}, ""}
 
 func logRequest(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -81,11 +82,12 @@ func logRequest(handler http.Handler) http.Handler {
 func getPFWConfig(w http.ResponseWriter, r *http.Request) {
 	loadFirewallRules()
 
-	FWmtx.RLock()
-	defer FWmtx.RUnlock()
+	x := gFirewallConfig
+
+	x.APIToken = "*masked*"
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(gFirewallConfig)
+	json.NewEncoder(w).Encode(x)
 }
 
 func saveFirewallRulesLocked() {
@@ -147,26 +149,91 @@ func validateClientIdentifier(client ClientIdentifier) error {
 	return nil
 }
 
+type DeviceEntry struct {
+	Name       string
+	MAC        string
+	WGPubKey   string
+	VLANTag    string
+	RecentIP   string
+	PSKEntry   PSKEntry
+	Groups     []string
+	DeviceTags []string
+}
+
+type PSKEntry struct {
+	Type string
+	Psk  string
+}
+
+func APIDevices() map[string]DeviceEntry {
+	devs := map[string]DeviceEntry{}
+
+	cli := http.Client{
+		Timeout: time.Second * 2, // Timeout after 2 seconds
+	}
+
+	//	req, err := http.NewRequest(http.MethodGet, "http://localhost:80/devices", nil)
+	req, err := http.NewRequest(http.MethodGet, "http://192.168.2.26:80/devices", nil)
+	if err != nil {
+		fmt.Println(err)
+		return devs
+	}
+
+	FWmtx.RLock()
+	token := gFirewallConfig.APIToken
+	FWmtx.RUnlock()
+
+	req.Header.Add("Authorization", "Bearer "+token)
+
+	resp, err := cli.Do(req)
+	if err != nil {
+		fmt.Println("request failed", err)
+		return devs
+	}
+
+	defer resp.Body.Close()
+
+	json.NewDecoder(resp.Body).Decode(&devs)
+
+	return devs
+}
+
 func clientIPs(client ClientIdentifier) []string {
 	//return a list of IPs from a ClientIdentifier
 	if client.SrcIP != "" {
 		return []string{client.SrcIP}
 	}
 
+	devices := APIDevices()
+
 	if client.Identity != "" {
-		//look up last recent ip for the rule
+		entry, exists := devices[client.Identity]
+		if exists {
+			if entry.RecentIP != "" {
+				return []string{entry.RecentIP}
+			}
+		}
 	}
 
 	if client.Group != "" {
-		//ips := []string{}
-		//for each device in the group, get the recent ip and return those
+		ips := []string{}
+
+		for _, entry := range devices {
+			for _, group := range entry.Groups {
+				if group == client.Group && entry.RecentIP != "" {
+					ips = append(ips, entry.RecentIP)
+					break
+				}
+			}
+		}
+		return ips
 	}
 
 	return []string{}
 }
 
 func isBlockInstalled(br BlockRule, clientIP string) bool {
-	cmd := exec.Command("nft", "get", "element", "inet", "nat", blockVmapName, "{",
+	cmd := exec.Command("nft", "get", "element", "inet", "filter", blockVmapName, "{",
 		clientIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", blockVerdict, "}")
 
 	err := cmd.Run()
@@ -179,7 +246,7 @@ func isBlockInstalled(br BlockRule, clientIP string) bool {
 }
 
 func addBlock(br BlockRule, clientIP string) error {
-	cmd := exec.Command("nft", "add", "element", "inet", "nat", blockVmapName, "{",
+	cmd := exec.Command("nft", "add", "element", "inet", "filter", blockVmapName, "{",
 		clientIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", blockVerdict, "}")
 
 	_, err := cmd.Output()
@@ -192,7 +259,7 @@ func addBlock(br BlockRule, clientIP string) error {
 }
 
 func deleteBlock(br BlockRule, clientIP string) error {
-	cmd := exec.Command("nft", "delete", "element", "inet", "nat", blockVmapName, "{",
+	cmd := exec.Command("nft", "delete", "element", "inet", "filter", blockVmapName, "{",
 		clientIP, ".", br.DstIP, ".", br.Protocol, ".", br.DstPort, ":", blockVerdict, "}")
 
 	_, err := cmd.Output()

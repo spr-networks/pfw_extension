@@ -19,5 +19,5 @@ RUN apt-get update
 RUN apt-get install -y nftables iproute2 netcat inetutils-ping net-tools nano ca-certificates curl
 RUN apt-get install -y hostapd
 COPY scripts /scripts/
-COPY --from=builder /api_sample_plugin /
+COPY --from=builder /pfw /
 ENTRYPOINT ["/scripts/startup.sh"]
