@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -45,8 +46,9 @@ type PFWRule struct {
 	RuleName string
 	Client   ClientIdentifier
 
-	Time      TimeExpression
-	Condition string
+	Time       TimeExpression
+	Expiration int64 //non zero unix time to expire
+	Condition  string
 
 	Protocol string
 	DstIP    string
@@ -379,6 +381,13 @@ func ruleActive(condition string, t TimeExpression) bool {
 	return true
 }
 
+func ruleExpired(expiry int64) bool {
+	if expiry != 0 && expiry < time.Now().Unix() {
+		return true
+	}
+	return false
+}
+
 func applyFirewallRulesLocked() {
 
 	//forwarding rules
@@ -386,7 +395,7 @@ func applyFirewallRulesLocked() {
 		for _, clientIP := range clientIPs(fw.Client) {
 
 			is_installed := isForwardingInstalled(fw, clientIP)
-			if ruleActive(fw.Condition, fw.Time) && !is_installed {
+			if !ruleExpired(fw.Expiration) && ruleActive(fw.Condition, fw.Time) && !is_installed {
 				addForwarding(fw, clientIP)
 			} else if is_installed {
 				deleteForwarding(fw, clientIP)
@@ -399,7 +408,7 @@ func applyFirewallRulesLocked() {
 	for _, br := range gFirewallConfig.BlockRules {
 		for _, clientIP := range clientIPs(br.Client) {
 			is_installed := isBlockInstalled(br, clientIP)
-			if ruleActive(br.Condition, br.Time) && !is_installed {
+			if !ruleExpired(br.Expiration) && ruleActive(br.Condition, br.Time) && !is_installed {
 				addBlock(br, clientIP)
 			} else if is_installed {
 				deleteBlock(br, clientIP)
@@ -434,37 +443,59 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 	FWmtx.Lock()
 	defer FWmtx.Unlock()
 
+	vars := mux.Vars(r)
+	indexStr, index_ok := vars["index"]
+	index := 0
 	fwd := ForwardingRule{}
-	err := json.NewDecoder(r.Body).Decode(&fwd)
-	if err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
 
-	if fwd.Protocol != "tcp" && fwd.Protocol != "udp" {
-		http.Error(w, "Invalid protocol", 400)
-		return
-	}
-
-	re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
-
-	if fwd.DstPort != "any" && !re.MatchString(fwd.DstPort) {
+	if index_ok {
+		val, err := strconv.Atoi(indexStr)
 		if err != nil {
-			http.Error(w, "Invalid DstPort", 400)
+			http.Error(w, "invalid index", 400)
+			return
+		}
+		index = val
+		if index < 0 || index >= len(gFirewallConfig.BlockRules) {
+			http.Error(w, "invalid index", 400)
 			return
 		}
 	}
 
-	err = validateClientIdentifier(fwd.Client)
-	if err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
+	if index_ok && r.Method == http.MethodDelete {
+		//for delete retrieve the existing entry, do not decode.
+		fwd = gFirewallConfig.ForwardingRules[index]
+	} else {
+		err := json.NewDecoder(r.Body).Decode(&fwd)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
 
-	ip := net.ParseIP(fwd.DstIP)
-	if ip == nil {
-		http.Error(w, "Invalid DstIP", 400)
-		return
+		if fwd.Protocol != "tcp" && fwd.Protocol != "udp" {
+			http.Error(w, "Invalid protocol", 400)
+			return
+		}
+
+		re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
+
+		if fwd.DstPort != "any" && !re.MatchString(fwd.DstPort) {
+			if err != nil {
+				http.Error(w, "Invalid DstPort", 400)
+				return
+			}
+		}
+
+		err = validateClientIdentifier(fwd.Client)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+
+		ip := net.ParseIP(fwd.DstIP)
+		if ip == nil {
+			http.Error(w, "Invalid DstIP", 400)
+			return
+		}
 	}
 
 	if r.Method == http.MethodDelete {
@@ -480,7 +511,13 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gFirewallConfig.ForwardingRules = append(gFirewallConfig.ForwardingRules, fwd)
+	if index_ok {
+		//update existing index with the new fwd
+		gFirewallConfig.ForwardingRules[index] = fwd
+	} else {
+		gFirewallConfig.ForwardingRules = append(gFirewallConfig.ForwardingRules, fwd)
+	}
+
 	saveFirewallRulesLocked()
 }
 
@@ -488,35 +525,57 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 	FWmtx.Lock()
 	defer FWmtx.Unlock()
 
+	vars := mux.Vars(r)
+	indexStr, index_ok := vars["index"]
+	index := 0
 	br := BlockRule{}
-	err := json.NewDecoder(r.Body).Decode(&br)
-	if err != nil {
-		http.Error(w, err.Error(), 400)
-		return
+
+	if index_ok {
+		val, err := strconv.Atoi(indexStr)
+		if err != nil {
+			http.Error(w, "invalid index", 400)
+			return
+		}
+		index = val
+		if index < 0 || index >= len(gFirewallConfig.BlockRules) {
+			http.Error(w, "invalid index", 400)
+			return
+		}
 	}
 
-	if br.Protocol != "tcp" && br.Protocol != "udp" {
-		http.Error(w, "invalid protocol", 400)
-		return
-	}
+	if index_ok && r.Method == http.MethodDelete {
+		//for delete retrieve the existing entry, do not decode.
+		br = gFirewallConfig.BlockRules[index]
+	} else {
+		err := json.NewDecoder(r.Body).Decode(&br)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
 
-	//this would accept -1 etc, which is invalid
-	re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
+		if br.Protocol != "tcp" && br.Protocol != "udp" {
+			http.Error(w, "invalid protocol", 400)
+			return
+		}
 
-	if !re.MatchString(br.DstPort) {
-		http.Error(w, "Invalid SrcPort", 400)
-		return
-	}
+		//this would accept -1 etc, which is invalid
+		re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
 
-	err = validateClientIdentifier(br.Client)
-	if err != nil {
-		http.Error(w, err.Error(), 400)
-		return
-	}
+		if !re.MatchString(br.DstPort) {
+			http.Error(w, "Invalid SrcPort", 400)
+			return
+		}
 
-	if CIDRorIP(br.DstIP) != nil {
-		http.Error(w, "Invalid DstIP", 400)
-		return
+		err = validateClientIdentifier(br.Client)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+
+		if CIDRorIP(br.DstIP) != nil {
+			http.Error(w, "Invalid DstIP", 400)
+			return
+		}
 	}
 
 	if r.Method == http.MethodDelete {
@@ -532,7 +591,12 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	gFirewallConfig.BlockRules = append(gFirewallConfig.BlockRules, br)
+	if index_ok {
+		//update existing index with the new br
+		gFirewallConfig.BlockRules[index] = br
+	} else {
+		gFirewallConfig.BlockRules = append(gFirewallConfig.BlockRules, br)
+	}
 	saveFirewallRulesLocked()
 }
 
@@ -653,7 +717,9 @@ func main() {
 
 	unix_plugin_router.HandleFunc("/config", getPFWConfig).Methods("GET")
 	unix_plugin_router.HandleFunc("/block", modifyBlockRules).Methods("DELETE", "PUT")
+	unix_plugin_router.HandleFunc("/block/{index:[0-9]+}", modifyBlockRules).Methods("DELETE", "PUT")
 	unix_plugin_router.HandleFunc("/forward", modifyForwardRules).Methods("DELETE", "PUT")
+	unix_plugin_router.HandleFunc("/forward/{index:[0-9]+}", modifyForwardRules).Methods("DELETE", "PUT")
 	unix_plugin_router.HandleFunc("/variable/{name}", handleVariable).Methods("DELETE", "GET", "PUT")
 	unix_plugin_router.HandleFunc("/testExpression", testExpression).Methods("POST")
 
