@@ -25,31 +25,31 @@ var UNIX_PLUGIN_LISTENER = TEST_PREFIX + "/state/plugins/pfw/socket"
 var FWmtx sync.RWMutex
 
 type ClientIdentifier struct {
-	Identity  string
-	Group     string
-	SrcIP     string
+	Identity string
+	Group    string
+	SrcIP    string
 }
 
 type TimeExpression struct {
-	CronExpr  string		// Cron time expression
+	CronExpr string // Cron time expression
 
 	// OR
 
-	Start  		string		// Time of Day to start
-	End    		string		// Time of Day to stop (note if End < Start, then rolling over)
-	Days      [7]int		// Days when to apply TimeStart
+	Start string // Time of Day to start
+	End   string // Time of Day to stop (note if End < Start, then rolling over)
+	Days  [7]int // Days when to apply TimeStart
 }
 
 type PFWRule struct {
-	RuleName	string
-	Client 		ClientIdentifier
+	RuleName string
+	Client   ClientIdentifier
 
-	Time			TimeExpression
+	Time      TimeExpression
 	Condition string
 
-	Protocol  string
-	DstIP     string
-	DstPort   string
+	Protocol string
+	DstIP    string
+	DstPort  string
 }
 
 type BlockRule struct {
@@ -58,8 +58,8 @@ type BlockRule struct {
 
 type ForwardingRule struct {
 	PFWRule
-	NewInterface	string
-	NewDstIP string
+	NewInterface string
+	NewDstIP     string
 }
 
 type FirewallConfig struct {
@@ -70,7 +70,6 @@ type FirewallConfig struct {
 
 var FirewallConfigFile = TEST_PREFIX + "/configs/pfw/rules.json"
 var gFirewallConfig = FirewallConfig{[]ForwardingRule{}, []BlockRule{}, map[string]interface{}{}}
-
 
 func logRequest(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -130,7 +129,6 @@ func validateClientIdentifier(client ClientIdentifier) error {
 	if count != 1 {
 		return fmt.Errorf("One parameter is required for the ClientIdentifier")
 	}
-
 
 	if client.SrcIP != "" {
 		if CIDRorIP(client.SrcIP) != nil {
@@ -207,7 +205,6 @@ func deleteBlock(br BlockRule, clientIP string) error {
 	return err
 }
 
-
 func isForwardingInstalled(fw ForwardingRule, clientIP string) bool {
 	return false
 }
@@ -224,15 +221,14 @@ func addForwarding(f ForwardingRule, clientIP string) error {
 
 //https://stackoverflow.com/questions/55093676/checking-if-current-time-is-in-a-given-interval-golang
 func inTimeSpan(start, end, check time.Time) bool {
-    if start.Before(end) {
-        return !check.Before(start) && !check.After(end)
-    }
-    if start.Equal(end) {
-        return check.Equal(start)
-    }
-    return !start.After(check) || !end.Before(check)
+	if start.Before(end) {
+		return !check.Before(start) && !check.After(end)
+	}
+	if start.Equal(end) {
+		return check.Equal(start)
+	}
+	return !start.After(check) || !end.Before(check)
 }
-
 
 //returns true if the current time is matched
 // by the time expression
@@ -279,7 +275,6 @@ func activeTime(t TimeExpression) bool {
 	return inTimeSpan(t1, t2, check)
 }
 
-
 func timeSet(t TimeExpression) bool {
 	if t.CronExpr != "" {
 		return true // cron was set
@@ -321,7 +316,7 @@ func applyFirewallRulesLocked() {
 
 	//forwarding rules
 	for _, fw := range gFirewallConfig.ForwardingRules {
-		for _, clientIP := range(clientIPs(fw.Client)) {
+		for _, clientIP := range clientIPs(fw.Client) {
 
 			is_installed := isForwardingInstalled(fw, clientIP)
 			if ruleActive(fw.Condition, fw.Time) && !is_installed {
@@ -335,7 +330,7 @@ func applyFirewallRulesLocked() {
 
 	//block rules
 	for _, br := range gFirewallConfig.BlockRules {
-		for _, clientIP := range(clientIPs(br.Client)) {
+		for _, clientIP := range clientIPs(br.Client) {
 			is_installed := isBlockInstalled(br, clientIP)
 			if ruleActive(br.Condition, br.Time) && !is_installed {
 				addBlock(br, clientIP)
