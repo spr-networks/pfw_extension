@@ -4,13 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
-	"log"
 	"net"
 	"net/http"
 	"os"
 	"os/exec"
 	"regexp"
-	"strconv"
 	"sync"
 	"time"
 )
@@ -32,25 +30,36 @@ type ClientIdentifier struct {
 	SrcIP     string
 }
 
-type BlockRule struct {
+type TimeExpression struct {
+	CronExpr  string		// Cron time expression
+
+	// OR
+
+	Start  		string		// Time of Day to start
+	End    		string		// Time of Day to stop (note if End < Start, then rolling over)
+	Days      [7]int		// Days when to apply TimeStart
+}
+
+type PFWRule struct {
+	RuleName	string
 	Client 		ClientIdentifier
+
+	Time			TimeExpression
+	Condition string
+
+	Protocol  string
 	DstIP     string
 	DstPort   string
-	Protocol  string
-	CronExpr  string
-	Condition string
+}
+
+type BlockRule struct {
+	PFWRule
 }
 
 type ForwardingRule struct {
-	Client		ClientIdentifier
-	DstIP     string
-	SrcPort   string
-	Protocol  string
-	CronExpr  string
-	Condition string
-
+	PFWRule
+	NewInterface	string
 	NewDstIP string
-	DstPort  string
 }
 
 type FirewallConfig struct {
@@ -71,8 +80,11 @@ func logRequest(handler http.Handler) http.Handler {
 }
 
 func getPFWConfig(w http.ResponseWriter, r *http.Request) {
+	loadFirewallRules()
+
 	FWmtx.RLock()
 	defer FWmtx.RUnlock()
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(gFirewallConfig)
 }
@@ -81,7 +93,7 @@ func saveFirewallRulesLocked() {
 	file, _ := json.MarshalIndent(gFirewallConfig, "", " ")
 	err := ioutil.WriteFile(FirewallConfigFile, file, 0600)
 	if err != nil {
-		log.Fatal(err)
+		fmt.Println(err)
 	}
 }
 
@@ -210,27 +222,87 @@ func addForwarding(f ForwardingRule, clientIP string) error {
 	return nil
 }
 
-func ruleActive(condition string, cron string) bool {
-	cronChecker := cronexpr.New()
+//https://stackoverflow.com/questions/55093676/checking-if-current-time-is-in-a-given-interval-golang
+func inTimeSpan(start, end, check time.Time) bool {
+    if start.Before(end) {
+        return !check.Before(start) && !check.After(end)
+    }
+    if start.Equal(end) {
+        return check.Equal(start)
+    }
+    return !start.After(check) || !end.Before(check)
+}
 
-	//check if time is active
-	if cron != "" {
-		if !cronChecker.IsValid(cron) {
-			fmt.Println("Invalid cron expression", cron)
+
+//returns true if the current time is matched
+// by the time expression
+func activeTime(t TimeExpression) bool {
+
+	if t.CronExpr != "" {
+		cronChecker := cronexpr.New()
+		//had a cron expression to check
+		if !cronChecker.IsValid(t.CronExpr) {
+			fmt.Println("Invalid cron expression", t.CronExpr)
 			return false
 		}
 
-		val, err := cronChecker.IsDue(cron)
+		val, err := cronChecker.IsDue(t.CronExpr)
 		if err != nil {
 			fmt.Println("Invalid cron expression", err.Error())
 			return false
 		}
 
-		if val == false {
-			return false
-		}
+		return val
 	}
 
+	//NOTE: sunday = 0 in go. america f yeah
+	weekday := time.Now().Weekday()
+	if t.Days[int(weekday)] == 0 {
+		// wrong day of the week
+		return false
+	}
+
+	t1, err := time.Parse("1504", t.Start)
+	if err != nil {
+		fmt.Println("invalid TimeStart", err)
+		return false
+	}
+
+	t2, err := time.Parse("1504", t.End)
+	if err != nil {
+		fmt.Println("invalid TimeEnd", err)
+		return false
+	}
+
+	check, _ := time.Parse("1504", time.Now().Format("1504"))
+
+	return inTimeSpan(t1, t2, check)
+}
+
+
+func timeSet(t TimeExpression) bool {
+	if t.CronExpr != "" {
+		return true // cron was set
+	}
+
+	//time start is set
+	if t.Start != "" {
+		return true
+	}
+
+	// time is not set, do not check time
+	return false
+}
+
+func ruleActive(condition string, t TimeExpression) bool {
+
+	//if a time is specified and its not active at the current time
+	// then the rule is not active
+	if timeSet(t) && !activeTime(t) {
+		return false
+	}
+
+	//check condition variables
 	if condition != "" {
 		value, err := gval.Evaluate(condition, gFirewallConfig.Variables)
 		if err != nil {
@@ -252,7 +324,7 @@ func applyFirewallRulesLocked() {
 		for _, clientIP := range(clientIPs(fw.Client)) {
 
 			is_installed := isForwardingInstalled(fw, clientIP)
-			if ruleActive(fw.Condition, fw.CronExpr) && !is_installed {
+			if ruleActive(fw.Condition, fw.Time) && !is_installed {
 				addForwarding(fw, clientIP)
 			} else if is_installed {
 				deleteForwarding(fw, clientIP)
@@ -265,7 +337,7 @@ func applyFirewallRulesLocked() {
 	for _, br := range gFirewallConfig.BlockRules {
 		for _, clientIP := range(clientIPs(br.Client)) {
 			is_installed := isBlockInstalled(br, clientIP)
-			if ruleActive(br.Condition, br.CronExpr) && !is_installed {
+			if ruleActive(br.Condition, br.Time) && !is_installed {
 				addBlock(br, clientIP)
 			} else if is_installed {
 				deleteBlock(br, clientIP)
@@ -314,13 +386,7 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 
 	re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
 
-	if fwd.SrcPort != "any" && !re.MatchString(fwd.SrcPort) {
-		http.Error(w, "Invalid SrcPort", 400)
-		return
-	}
-
-	if fwd.DstPort != "any" {
-		_, err = strconv.Atoi(fwd.DstPort)
+	if fwd.DstPort != "any" && !re.MatchString(fwd.DstPort) {
 		if err != nil {
 			http.Error(w, "Invalid DstPort", 400)
 			return
