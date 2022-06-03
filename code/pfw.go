@@ -327,19 +327,19 @@ func activeTime(t TimeExpression) bool {
 		return false
 	}
 
-	t1, err := time.Parse("1504", t.Start)
+	t1, err := time.Parse("15:04", t.Start)
 	if err != nil {
 		fmt.Println("invalid TimeStart", err)
 		return false
 	}
 
-	t2, err := time.Parse("1504", t.End)
+	t2, err := time.Parse("15:04", t.End)
 	if err != nil {
 		fmt.Println("invalid TimeEnd", err)
 		return false
 	}
 
-	check, _ := time.Parse("1504", time.Now().Format("1504"))
+	check, _ := time.Parse("15:04", time.Now().Format("15:04"))
 
 	return inTimeSpan(t1, t2, check)
 }
@@ -395,8 +395,10 @@ func applyFirewallRulesLocked() {
 		for _, clientIP := range clientIPs(fw.Client) {
 
 			is_installed := isForwardingInstalled(fw, clientIP)
-			if !ruleExpired(fw.Expiration) && ruleActive(fw.Condition, fw.Time) && !is_installed {
-				addForwarding(fw, clientIP)
+			if !ruleExpired(fw.Expiration) && ruleActive(fw.Condition, fw.Time) {
+				if !is_installed {
+					addForwarding(fw, clientIP)
+				}
 			} else if is_installed {
 				deleteForwarding(fw, clientIP)
 			}
@@ -408,8 +410,10 @@ func applyFirewallRulesLocked() {
 	for _, br := range gFirewallConfig.BlockRules {
 		for _, clientIP := range clientIPs(br.Client) {
 			is_installed := isBlockInstalled(br, clientIP)
-			if !ruleExpired(br.Expiration) && ruleActive(br.Condition, br.Time) && !is_installed {
-				addBlock(br, clientIP)
+			if !ruleExpired(br.Expiration) && ruleActive(br.Condition, br.Time) {
+				if !is_installed {
+					addBlock(br, clientIP)
+				}
 			} else if is_installed {
 				deleteBlock(br, clientIP)
 			}
@@ -509,6 +513,10 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 			if fwd == a {
 				gFirewallConfig.ForwardingRules = append(gFirewallConfig.ForwardingRules[:i], gFirewallConfig.ForwardingRules[i+1:]...)
 				saveFirewallRulesLocked()
+
+				for _, clientIP := range clientIPs(fwd.Client) {
+					deleteForwarding(fwd, clientIP)
+				}
 				return
 			}
 		}
@@ -518,6 +526,12 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 
 	if index_ok {
 		//update existing index with the new fwd
+
+		old_fwd := gFirewallConfig.ForwardingRules[index]
+		for _, clientIP := range clientIPs(old_fwd.Client) {
+			deleteForwarding(old_fwd, clientIP)
+		}
+
 		gFirewallConfig.ForwardingRules[index] = fwd
 	} else {
 		gFirewallConfig.ForwardingRules = append(gFirewallConfig.ForwardingRules, fwd)
@@ -593,6 +607,12 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 			if br == a {
 				gFirewallConfig.BlockRules = append(gFirewallConfig.BlockRules[:i], gFirewallConfig.BlockRules[i+1:]...)
 				saveFirewallRulesLocked()
+
+				//delete the block rules for the clients where it applies
+				for _, clientIP := range clientIPs(br.Client) {
+					deleteBlock(br, clientIP)
+				}
+
 				return
 			}
 		}
@@ -601,6 +621,12 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if index_ok {
+		//delete the block rules for the clients where it applies
+		old_br := gFirewallConfig.BlockRules[index]
+		for _, clientIP := range clientIPs(old_br.Client) {
+			deleteBlock(old_br, clientIP)
+		}
+
 		//update existing index with the new br
 		gFirewallConfig.BlockRules[index] = br
 	} else {
