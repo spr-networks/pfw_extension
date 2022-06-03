@@ -478,11 +478,16 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 
 		re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
 
-		if fwd.DstPort != "any" && !re.MatchString(fwd.DstPort) {
+		if !re.MatchString(fwd.DstPort) {
 			if err != nil {
 				http.Error(w, "Invalid DstPort", 400)
 				return
 			}
+		}
+
+		if fwd.DstPort == "" {
+			//all ports
+			fwd.DstPort = "0-65535"
 		}
 
 		err = validateClientIdentifier(fwd.Client)
@@ -558,12 +563,16 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		//this would accept -1 etc, which is invalid
 		re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
 
 		if !re.MatchString(br.DstPort) {
-			http.Error(w, "Invalid SrcPort", 400)
+			http.Error(w, "Invalid DstPort", 400)
 			return
+		}
+
+		if br.DstPort == "" {
+			//all ports
+			br.DstPort = "0-65535"
 		}
 
 		err = validateClientIdentifier(br.Client)
