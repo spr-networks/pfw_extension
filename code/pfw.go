@@ -417,6 +417,7 @@ func applyFirewallRulesLocked() {
 			} else if is_installed {
 				deleteBlock(br, clientIP)
 			}
+
 		}
 	}
 }
@@ -514,9 +515,11 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 				gFirewallConfig.ForwardingRules = append(gFirewallConfig.ForwardingRules[:i], gFirewallConfig.ForwardingRules[i+1:]...)
 				saveFirewallRulesLocked()
 
+				FWmtx.Unlock()
 				for _, clientIP := range clientIPs(fwd.Client) {
 					deleteForwarding(fwd, clientIP)
 				}
+				FWmtx.Lock()
 				return
 			}
 		}
@@ -528,11 +531,12 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 		//update existing index with the new fwd
 
 		old_fwd := gFirewallConfig.ForwardingRules[index]
+		gFirewallConfig.ForwardingRules[index] = fwd
+		FWmtx.Unlock()
 		for _, clientIP := range clientIPs(old_fwd.Client) {
 			deleteForwarding(old_fwd, clientIP)
 		}
-
-		gFirewallConfig.ForwardingRules[index] = fwd
+		FWmtx.Lock()
 	} else {
 		gFirewallConfig.ForwardingRules = append(gFirewallConfig.ForwardingRules, fwd)
 	}
@@ -608,11 +612,12 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 				gFirewallConfig.BlockRules = append(gFirewallConfig.BlockRules[:i], gFirewallConfig.BlockRules[i+1:]...)
 				saveFirewallRulesLocked()
 
+				FWmtx.Unlock()
 				//delete the block rules for the clients where it applies
 				for _, clientIP := range clientIPs(br.Client) {
 					deleteBlock(br, clientIP)
 				}
-
+				FWmtx.Lock()
 				return
 			}
 		}
@@ -623,12 +628,15 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 	if index_ok {
 		//delete the block rules for the clients where it applies
 		old_br := gFirewallConfig.BlockRules[index]
+		//update existing index with the new br
+		gFirewallConfig.BlockRules[index] = br
+
+		FWmtx.Unlock()
 		for _, clientIP := range clientIPs(old_br.Client) {
 			deleteBlock(old_br, clientIP)
 		}
+		FWmtx.Lock()
 
-		//update existing index with the new br
-		gFirewallConfig.BlockRules[index] = br
 	} else {
 		gFirewallConfig.BlockRules = append(gFirewallConfig.BlockRules, br)
 	}
