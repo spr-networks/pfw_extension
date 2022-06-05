@@ -174,8 +174,7 @@ func APIDevices() map[string]DeviceEntry {
 		Timeout: time.Second * 2, // Timeout after 2 seconds
 	}
 
-	//	req, err := http.NewRequest(http.MethodGet, "http://localhost:80/devices", nil)
-	req, err := http.NewRequest(http.MethodGet, "http://192.168.2.26:80/devices", nil)
+	req, err := http.NewRequest(http.MethodGet, "http://localhost:80/devices", nil)
 	if err != nil {
 		fmt.Println(err)
 		return devs
