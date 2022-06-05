@@ -69,10 +69,9 @@ type FirewallConfig struct {
 	ForwardingRules []ForwardingRule
 	BlockRules      []BlockRule
 	Variables       map[string]interface{}
-	APIToken        string
 }
 
-var gFirewallConfig = FirewallConfig{[]ForwardingRule{}, []BlockRule{}, map[string]interface{}{}, ""}
+var gFirewallConfig = FirewallConfig{[]ForwardingRule{}, []BlockRule{}, map[string]interface{}{}}
 
 func logRequest(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -85,8 +84,6 @@ func getPFWConfig(w http.ResponseWriter, r *http.Request) {
 	loadFirewallRules()
 
 	x := gFirewallConfig
-
-	x.APIToken = "*masked*"
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(x)
@@ -167,34 +164,22 @@ type PSKEntry struct {
 	Psk  string
 }
 
+var DevicesConfigPath = TEST_PREFIX + "/configs/devices/"
+var DevicesPublicConfigFile = DevicesConfigPath + "devices-public.json"
+
 func APIDevices() map[string]DeviceEntry {
 	devs := map[string]DeviceEntry{}
 
-	cli := http.Client{
-		Timeout: time.Second * 2, // Timeout after 2 seconds
-	}
-
-	req, err := http.NewRequest(http.MethodGet, "http://localhost:80/devices", nil)
-	if err != nil {
+	data, err := ioutil.ReadFile(DevicesPublicConfigFile)
+	if err == nil {
+		public_devices := map[string]DeviceEntry{}
+		err = json.Unmarshal(data, &public_devices)
+		if err != nil {
+			fmt.Println(err)
+		}
+	} else {
 		fmt.Println(err)
-		return devs
 	}
-
-	FWmtx.RLock()
-	token := gFirewallConfig.APIToken
-	FWmtx.RUnlock()
-
-	req.Header.Add("Authorization", "Bearer "+token)
-
-	resp, err := cli.Do(req)
-	if err != nil {
-		fmt.Println("request failed", err)
-		return devs
-	}
-
-	defer resp.Body.Close()
-
-	json.NewDecoder(resp.Body).Decode(&devs)
 
 	return devs
 }
