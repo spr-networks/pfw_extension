@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"reflect"
 	"regexp"
 	"strconv"
 	"sync"
@@ -49,29 +51,54 @@ type PFWRule struct {
 	Time       TimeExpression
 	Expiration int64 //non zero unix time to expire
 	Condition  string
+}
 
+type BlockRule struct {
+	PFWRule
 	Protocol string
 	DstIP    string
 	DstPort  string
 }
 
-type BlockRule struct {
-	PFWRule
-}
-
 type ForwardingRule struct {
 	PFWRule
+	Protocol     string
+	DstIP        string
+	DstPort      string
 	NewInterface string
 	NewDstIP     string
+}
+
+type GroupRule struct {
+	PFWRule
+	Groups []string
+}
+
+type TagRule struct {
+	PFWRule
+	Tags []string
 }
 
 type FirewallConfig struct {
 	ForwardingRules []ForwardingRule
 	BlockRules      []BlockRule
+	TagRules        []TagRule
+	GroupRules      []GroupRule
 	Variables       map[string]interface{}
+	APIToken        string
 }
 
-var gFirewallConfig = FirewallConfig{[]ForwardingRule{}, []BlockRule{}, map[string]interface{}{}}
+/*
+Helper functions to consider:
+- is device in group
+- does device have tag
+- is device connected on wifi
+- is device in arp table
+- is device connected via vpn
+
+*/
+
+var gFirewallConfig = FirewallConfig{[]ForwardingRule{}, []BlockRule{}, []TagRule{}, []GroupRule{}, map[string]interface{}{}, ""}
 
 func logRequest(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -84,6 +111,8 @@ func getPFWConfig(w http.ResponseWriter, r *http.Request) {
 	loadFirewallRules()
 
 	x := gFirewallConfig
+
+	x.APIToken = "*masked*"
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(x)
@@ -164,24 +193,84 @@ type PSKEntry struct {
 	Psk  string
 }
 
-var DevicesConfigPath = TEST_PREFIX + "/configs/devices/"
-var DevicesPublicConfigFile = DevicesConfigPath + "devices-public.json"
-
-func APIDevices() map[string]DeviceEntry {
+func fetchAPIDevices() map[string]DeviceEntry {
 	devs := map[string]DeviceEntry{}
 
-	data, err := ioutil.ReadFile(DevicesPublicConfigFile)
-	if err == nil {
-		public_devices := map[string]DeviceEntry{}
-		err = json.Unmarshal(data, &public_devices)
-		if err != nil {
-			fmt.Println(err)
-		}
-	} else {
-		fmt.Println(err)
+	cli := http.Client{
+		Timeout: time.Second * 2, // Timeout after 2 seconds
 	}
 
+	req, err := http.NewRequest(http.MethodGet, "http://localhost:80/devices", nil)
+	if err != nil {
+		fmt.Println(err)
+		return devs
+	}
+
+	FWmtx.RLock()
+	token := gFirewallConfig.APIToken
+	FWmtx.RUnlock()
+
+	req.Header.Add("Authorization", "Bearer "+token)
+
+	resp, err := cli.Do(req)
+	if err != nil {
+		fmt.Println("request failed", err)
+		return devs
+	}
+
+	defer resp.Body.Close()
+
+	json.NewDecoder(resp.Body).Decode(&devs)
+
 	return devs
+}
+
+func updateDevice(identity string, entry DeviceEntry) {
+	//Ensure PSKEntry is not modified
+	entry.PSKEntry.Psk = ""
+	entry.PSKEntry.Type = ""
+
+	cli := http.Client{
+		Timeout: time.Second * 2, // Timeout after 2 seconds
+	}
+
+	// marshal User to json
+	json, err := json.Marshal(entry)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	req, err := http.NewRequest(http.MethodPut, "http://localhost:80/device?identity="+identity, bytes.NewBuffer(json))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	FWmtx.RLock()
+	token := gFirewallConfig.APIToken
+	FWmtx.RUnlock()
+
+	req.Header.Add("Authorization", "Bearer "+token)
+
+	resp, err := cli.Do(req)
+	if err != nil {
+		fmt.Println("request failed", err)
+		return
+	}
+
+	defer resp.Body.Close()
+
+}
+
+var gDevices = make(map[string]DeviceEntry)
+
+func APIDevices() map[string]DeviceEntry {
+	return gDevices
+}
+
+func updateAPIData() {
+	gDevices = fetchAPIDevices()
 }
 
 func clientIPs(client ClientIdentifier) []string {
@@ -342,6 +431,19 @@ func timeSet(t TimeExpression) bool {
 	return false
 }
 
+func checkCondition(condition string) bool {
+	//returns true if the condition matches
+	// if there is a problem with the condition, it will return false
+	// NOTE: this means it can fail silently.
+
+	value, err := gval.Evaluate(condition, gFirewallConfig.Variables)
+	if err != nil {
+		fmt.Println("invalid rule", err)
+		return false
+	}
+	return value.(bool)
+}
+
 func ruleActive(condition string, t TimeExpression) bool {
 
 	//if a time is specified and its not active at the current time
@@ -352,14 +454,7 @@ func ruleActive(condition string, t TimeExpression) bool {
 
 	//check condition variables
 	if condition != "" {
-		value, err := gval.Evaluate(condition, gFirewallConfig.Variables)
-		if err != nil {
-			fmt.Println("invalid rule", err)
-			return false
-		}
-		if value == false {
-			return false
-		}
+		return checkCondition(condition)
 	}
 
 	return true
@@ -377,6 +472,9 @@ func applyFirewallRulesLocked() {
 	//forwarding rules
 	for _, fw := range gFirewallConfig.ForwardingRules {
 		for _, clientIP := range clientIPs(fw.Client) {
+			if ruleExpired(fw.Expiration) {
+				continue
+			}
 
 			is_installed := isForwardingInstalled(fw, clientIP)
 			if !ruleExpired(fw.Expiration) && ruleActive(fw.Condition, fw.Time) {
@@ -393,8 +491,12 @@ func applyFirewallRulesLocked() {
 	//block rules
 	for _, br := range gFirewallConfig.BlockRules {
 		for _, clientIP := range clientIPs(br.Client) {
+			if ruleExpired(br.Expiration) {
+				continue
+			}
+
 			is_installed := isBlockInstalled(br, clientIP)
-			if !ruleExpired(br.Expiration) && ruleActive(br.Condition, br.Time) {
+			if ruleActive(br.Condition, br.Time) {
 				if !is_installed {
 					addBlock(br, clientIP)
 				}
@@ -404,6 +506,32 @@ func applyFirewallRulesLocked() {
 
 		}
 	}
+
+	//tag assignment rules
+	for _, rule := range gFirewallConfig.TagRules {
+		if ruleExpired(rule.Expiration) {
+			continue
+		}
+		if ruleActive(rule.Condition, rule.Time) {
+			addClient("tag", rule.Client, rule.Tags)
+		} else {
+			removeClient("tag", rule.Client, rule.Tags)
+		}
+	}
+
+	//group assignment rules
+	for _, rule := range gFirewallConfig.GroupRules {
+		if ruleExpired(rule.Expiration) {
+			continue
+		}
+
+		if ruleActive(rule.Condition, rule.Time) {
+			addClient("group", rule.Client, rule.Groups)
+		} else {
+			removeClient("group", rule.Client, rule.Groups)
+		}
+	}
+
 }
 
 func initUserFirewallRules() {
@@ -709,6 +837,266 @@ func ruleTimer() {
 	go runTimer()
 }
 
+func refreshDataTimer() {
+
+	updateAPIData()
+
+	tick := time.NewTicker(1 * time.Minute)
+	defer tick.Stop()
+	for {
+		select {
+		case <-tick.C:
+			updateAPIData()
+		}
+	}
+}
+
+func matchClient(client ClientIdentifier, entry DeviceEntry, identity string) bool {
+	if client.Identity != "" && identity == client.Identity {
+		return true
+	}
+
+	if client.SrcIP != "" && entry.RecentIP == client.SrcIP {
+		return true
+	}
+
+	//check groups
+	for _, group := range entry.Groups {
+		if group == client.Group {
+			return true
+		}
+	}
+
+	return false
+}
+
+func removeClient(property string, client ClientIdentifier, values []string) {
+
+	devices := APIDevices()
+
+	for identity, entry := range devices {
+		if matchClient(client, entry, identity) {
+			newGroups := []string{}
+
+			entry_vals := entry.Groups
+			if property == "tag" {
+				entry_vals = entry.DeviceTags
+			}
+
+			for _, cur_group := range entry_vals {
+				skipGroup := false
+				for _, val_group := range values {
+					if cur_group == val_group {
+						skipGroup = true
+						break
+					}
+				}
+
+				if !skipGroup {
+					newGroups = append(newGroups, cur_group)
+				}
+
+				if len(newGroups) != len(entry_vals) {
+					//change groups or tags for this entry
+					if property == "group" {
+						entry.Groups = newGroups
+					} else {
+						entry.DeviceTags = newGroups
+					}
+					updateDevice(identity, entry)
+				}
+			}
+
+		}
+	}
+
+}
+
+func addClient(property string, client ClientIdentifier, values []string) {
+
+	devices := APIDevices()
+
+	for identity, entry := range devices {
+		if matchClient(client, entry, identity) {
+
+			entry_vals := entry.Groups
+			if property == "tag" {
+				entry_vals = entry.DeviceTags
+			}
+
+			newGroups := entry_vals
+
+			for _, val_group := range values {
+				skipGroup := false
+				for _, cur_group := range entry_vals {
+					if cur_group == val_group {
+						skipGroup = true
+						break
+					}
+				}
+
+				if !skipGroup {
+					newGroups = append(newGroups, val_group)
+				}
+
+				if len(newGroups) != len(entry_vals) {
+					//change groups or tags for this entry
+					if property == "group" {
+						entry.Groups = newGroups
+					} else {
+						entry.DeviceTags = newGroups
+					}
+					updateDevice(identity, entry)
+				}
+			}
+
+		}
+	}
+
+}
+
+func modifyTags(w http.ResponseWriter, r *http.Request) {
+	FWmtx.Lock()
+	defer FWmtx.Unlock()
+
+	vars := mux.Vars(r)
+	indexStr, index_ok := vars["index"]
+	index := 0
+	rule := TagRule{}
+
+	if index_ok {
+		val, err := strconv.Atoi(indexStr)
+		if err != nil {
+			http.Error(w, "invalid index", 400)
+			return
+		}
+		index = val
+		if index < 0 || index >= len(gFirewallConfig.TagRules) {
+			http.Error(w, "invalid index", 400)
+			return
+		}
+	}
+
+	if index_ok && r.Method == http.MethodDelete {
+		//for delete retrieve the existing entry, do not decode.
+		rule = gFirewallConfig.TagRules[index]
+	} else {
+		err := json.NewDecoder(r.Body).Decode(&rule)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+
+		err = validateClientIdentifier(rule.Client)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+	}
+
+	if r.Method == http.MethodDelete {
+		for i := range gFirewallConfig.TagRules {
+			a := gFirewallConfig.TagRules[i]
+			if reflect.DeepEqual(rule, a) {
+				gFirewallConfig.TagRules = append(gFirewallConfig.TagRules[:i], gFirewallConfig.TagRules[i+1:]...)
+				saveFirewallRulesLocked()
+
+				FWmtx.Unlock()
+				//delete the tag for the clients where it applies
+				removeClient("tag", rule.Client, rule.Tags)
+				FWmtx.Lock()
+				return
+			}
+		}
+		http.Error(w, "Not found", 404)
+		return
+	}
+
+	if index_ok {
+		old_rule := gFirewallConfig.TagRules[index]
+		gFirewallConfig.TagRules[index] = rule
+
+		FWmtx.Unlock()
+		removeClient("tag", old_rule.Client, old_rule.Tags)
+		FWmtx.Lock()
+
+	} else {
+		gFirewallConfig.TagRules = append(gFirewallConfig.TagRules, rule)
+	}
+	saveFirewallRulesLocked()
+}
+
+func modifyGroups(w http.ResponseWriter, r *http.Request) {
+	FWmtx.Lock()
+	defer FWmtx.Unlock()
+
+	vars := mux.Vars(r)
+	indexStr, index_ok := vars["index"]
+	index := 0
+	rule := GroupRule{}
+
+	if index_ok {
+		val, err := strconv.Atoi(indexStr)
+		if err != nil {
+			http.Error(w, "invalid index", 400)
+			return
+		}
+		index = val
+		if index < 0 || index >= len(gFirewallConfig.GroupRules) {
+			http.Error(w, "invalid index", 400)
+			return
+		}
+	}
+
+	if index_ok && r.Method == http.MethodDelete {
+		//for delete retrieve the existing entry, do not decode.
+		rule = gFirewallConfig.GroupRules[index]
+	} else {
+		err := json.NewDecoder(r.Body).Decode(&rule)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+
+		err = validateClientIdentifier(rule.Client)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+	}
+
+	if r.Method == http.MethodDelete {
+		for i := range gFirewallConfig.GroupRules {
+			a := gFirewallConfig.GroupRules[i]
+			if reflect.DeepEqual(rule, a) {
+				gFirewallConfig.GroupRules = append(gFirewallConfig.GroupRules[:i], gFirewallConfig.GroupRules[i+1:]...)
+				saveFirewallRulesLocked()
+
+				FWmtx.Unlock()
+				//delete the Group for the clients where it applies
+				removeClient("group", rule.Client, rule.Groups)
+				FWmtx.Lock()
+				return
+			}
+		}
+		http.Error(w, "Not found", 404)
+		return
+	}
+
+	if index_ok {
+		old_rule := gFirewallConfig.GroupRules[index]
+		gFirewallConfig.GroupRules[index] = rule
+
+		FWmtx.Unlock()
+		removeClient("group", old_rule.Client, old_rule.Groups)
+		FWmtx.Lock()
+
+	} else {
+		gFirewallConfig.GroupRules = append(gFirewallConfig.GroupRules, rule)
+	}
+	saveFirewallRulesLocked()
+}
+
 func initPFW() {
 
 	/*
@@ -736,6 +1124,7 @@ func initPFW() {
 	*/
 
 	loadFirewallRules()
+	refreshDataTimer()
 	ruleTimer()
 }
 
@@ -749,6 +1138,11 @@ func main() {
 	unix_plugin_router.HandleFunc("/forward/{index:[0-9]+}", modifyForwardRules).Methods("DELETE", "PUT")
 	unix_plugin_router.HandleFunc("/variable/{name}", handleVariable).Methods("DELETE", "GET", "PUT")
 	unix_plugin_router.HandleFunc("/testExpression", testExpression).Methods("POST")
+
+	unix_plugin_router.HandleFunc("/tag", modifyTags).Methods("DELETE", "PUT")
+	unix_plugin_router.HandleFunc("/tag/{index:[0-9]+}", modifyTags).Methods("DELETE", "PUT")
+	unix_plugin_router.HandleFunc("/group", modifyGroups).Methods("DELETE", "PUT")
+	unix_plugin_router.HandleFunc("/group/{index:[0-9]+}", modifyGroups).Methods("DELETE", "PUT")
 
 	os.Remove(UNIX_PLUGIN_LISTENER)
 	unixPluginListener, err := net.Listen("unix", UNIX_PLUGIN_LISTENER)
