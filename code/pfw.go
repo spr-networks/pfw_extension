@@ -62,11 +62,16 @@ type BlockRule struct {
 
 type ForwardingRule struct {
 	PFWRule
-	Protocol     string
+	Protocol string
+
+	SrcIP           string
+	SrcPort         string
+	OriginalDstIP   string
+	OriginalDstPort string
+
 	DstIP        string
 	DstPort      string
-	NewInterface string
-	NewDstIP     string
+	DstInterface string
 }
 
 type GroupRule struct {
@@ -87,16 +92,6 @@ type FirewallConfig struct {
 	Variables       map[string]interface{}
 	APIToken        string
 }
-
-/*
-Helper functions to consider:
-- is device in group
-- does device have tag
-- is device connected on wifi
-- is device in arp table
-- is device connected via vpn
-
-*/
 
 var gFirewallConfig = FirewallConfig{[]ForwardingRule{}, []BlockRule{}, []TagRule{}, []GroupRule{}, map[string]interface{}{}, ""}
 
@@ -347,18 +342,86 @@ func deleteBlock(br BlockRule, clientIP string) error {
 	return err
 }
 
-func isForwardingInstalled(fw ForwardingRule, clientIP string) bool {
-	return false
+func isForwardingInstalled(fwd ForwardingRule, clientIP string) bool {
+	var cmd *exec.Cmd
+
+	if fwd.OriginalDstPort != "" {
+		cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
+			clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+
+	} else {
+		cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
+			clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+	}
+
+	err := cmd.Run()
+
+	if err != nil {
+		return false
+	} else {
+		return true
+	}
 }
 
-func deleteForwarding(f ForwardingRule, clientIP string) error {
-	//not impl yet
-	return nil
+func addForwarding(fwd ForwardingRule, clientIP string) error {
+	var cmd *exec.Cmd
+
+	if fwd.OriginalDstPort != "" {
+		cmd = exec.Command("nft", "add", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
+			clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+
+		err := cmd.Run()
+		if err != nil {
+			fmt.Println("failed to add element", err)
+			fmt.Println(cmd)
+			return err
+		}
+
+		cmd = exec.Command("nft", "add", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_portmap", "{",
+			clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstPort, "}")
+
+	} else {
+		cmd = exec.Command("nft", "add", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
+			clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+	}
+
+	err := cmd.Run()
+	if err != nil {
+		fmt.Println("failed to add element", err)
+		fmt.Println(cmd)
+	}
+
+	return err
 }
 
-func addForwarding(f ForwardingRule, clientIP string) error {
-	//not impl yet
-	return nil
+func deleteForwarding(fwd ForwardingRule, clientIP string) error {
+	var cmd *exec.Cmd
+
+	if fwd.OriginalDstPort != "" {
+		cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
+			clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+
+		err := cmd.Run()
+		if err != nil {
+			fmt.Println("failed to delete element", err)
+			fmt.Println(cmd)
+		}
+
+		cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_portmap", "{",
+			clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstPort, "}")
+
+	} else {
+		cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
+			clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+	}
+
+	err := cmd.Run()
+	if err != nil {
+		fmt.Println("failed to delete element", err)
+		fmt.Println(cmd)
+	}
+
+	return err
 }
 
 //https://stackoverflow.com/questions/55093676/checking-if-current-time-is-in-a-given-interval-golang
@@ -431,17 +494,28 @@ func timeSet(t TimeExpression) bool {
 	return false
 }
 
-func checkCondition(condition string) bool {
+func checkCondition(condition string) (bool, error) {
 	//returns true if the condition matches
-	// if there is a problem with the condition, it will return false
-	// NOTE: this means it can fail silently.
+	// if there is a problem with the condition, it will return false, err
 
 	value, err := gval.Evaluate(condition, gFirewallConfig.Variables)
+
+	/*
+		Helper functions to consider:
+			gval.Function("name", func(...))
+
+		- is device in group		:: 				(IP|Device)Has(Group|Tag)(id, value)
+		- does device have tag  ::
+		- is device connected on wifi	::	(IP|Device)OnWifi(id)
+		- is device in arp table			::	(IP|Device)InArp(id)
+		- is device connected via vpn	::	(IP|Device)OnVPN(id)
+	*/
+
 	if err != nil {
 		fmt.Println("invalid rule", err)
-		return false
+		return false, err
 	}
-	return value.(bool)
+	return value.(bool), nil
 }
 
 func ruleActive(condition string, t TimeExpression) bool {
@@ -454,7 +528,8 @@ func ruleActive(condition string, t TimeExpression) bool {
 
 	//check condition variables
 	if condition != "" {
-		return checkCondition(condition)
+		result, _ := checkCondition(condition)
+		return result
 	}
 
 	return true
@@ -595,16 +670,25 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 
 		re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
 
-		if !re.MatchString(fwd.DstPort) {
+		if fwd.DstPort != "" && !re.MatchString(fwd.DstPort) {
 			if err != nil {
 				http.Error(w, "Invalid DstPort", 400)
 				return
 			}
 		}
 
-		if fwd.DstPort == "" {
-			//all ports
-			fwd.DstPort = "0-65535"
+		if fwd.OriginalDstPort != "" && !re.MatchString(fwd.OriginalDstPort) {
+			if err != nil {
+				http.Error(w, "Invalid OriginalDstPort", 400)
+				return
+			}
+		}
+
+		if fwd.SrcPort != "" && !re.MatchString(fwd.SrcPort) {
+			if err != nil {
+				http.Error(w, "Invalid OriginalDstPort", 400)
+				return
+			}
 		}
 
 		err = validateClientIdentifier(fwd.Client)
@@ -618,6 +702,19 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid DstIP", 400)
 			return
 		}
+
+		err = CIDRorIP(fwd.OriginalDstIP)
+		if err != nil {
+			http.Error(w, "Invalid OriginalDstIP "+err.Error(), 400)
+			return
+		}
+
+		err = CIDRorIP(fwd.SrcIP)
+		if err != nil {
+			http.Error(w, "Invalid SrcIP "+err.Error(), 400)
+			return
+		}
+
 	}
 
 	if r.Method == http.MethodDelete {
@@ -809,8 +906,8 @@ func testExpression(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Error reading body", 400)
 		return
 	}
-	value, err := gval.Evaluate(string(body), gFirewallConfig.Variables)
 
+	value, err := checkCondition(string(body))
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
@@ -1121,6 +1218,32 @@ func initPFW() {
 			counter ip saddr . ip daddr . ip protocol . udp dport vmap @fwd_block
 
 			//goto PFWDROPLOG
+
+
+
+
+
+
+			inet nat
+
+			map dnat_tcp_ipmap {
+				type ipv4_addr . ipv4_addr . inet_service : ipv4_addr
+			}
+
+			map dnat_tcp_portmap {
+				type ipv4_addr . ipv4_addr . inet_service : inet_service
+			}
+
+			map dnat_udp_ipmap {
+				type ipv4_addr . ipv4_addr . inet_service : ipv4_addr
+			}
+
+			map dnat_udp_portmap {
+				type ipv4_addr . ipv4_addr . inet_service : inet_service
+			}
+
+
+
 	*/
 
 	loadFirewallRules()
