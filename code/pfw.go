@@ -51,6 +51,8 @@ type PFWRule struct {
 	Time       TimeExpression
 	Expiration int64 //non zero unix time to expire
 	Condition  string
+
+	Disabled	 bool
 }
 
 type BlockRule struct {
@@ -64,8 +66,6 @@ type ForwardingRule struct {
 	PFWRule
 	Protocol string
 
-	SrcIP           string
-	SrcPort         string
 	OriginalDstIP   string
 	OriginalDstPort string
 
@@ -518,7 +518,10 @@ func checkCondition(condition string) (bool, error) {
 	return value.(bool), nil
 }
 
-func ruleActive(condition string, t TimeExpression) bool {
+func ruleActive(disabled bool, condition string, t TimeExpression) bool {
+	if disabled == true {
+		return false
+	}
 
 	//if a time is specified and its not active at the current time
 	// then the rule is not active
@@ -552,7 +555,7 @@ func applyFirewallRulesLocked() {
 			}
 
 			is_installed := isForwardingInstalled(fw, clientIP)
-			if !ruleExpired(fw.Expiration) && ruleActive(fw.Condition, fw.Time) {
+			if ruleActive(fw.Disabled, fw.Condition, fw.Time) {
 				if !is_installed {
 					addForwarding(fw, clientIP)
 				}
@@ -571,7 +574,7 @@ func applyFirewallRulesLocked() {
 			}
 
 			is_installed := isBlockInstalled(br, clientIP)
-			if ruleActive(br.Condition, br.Time) {
+			if ruleActive(br.Disabled, br.Condition, br.Time) {
 				if !is_installed {
 					addBlock(br, clientIP)
 				}
@@ -587,7 +590,7 @@ func applyFirewallRulesLocked() {
 		if ruleExpired(rule.Expiration) {
 			continue
 		}
-		if ruleActive(rule.Condition, rule.Time) {
+		if ruleActive(rule.Disabled, rule.Condition, rule.Time) {
 			addClient("tag", rule.Client, rule.Tags)
 		} else {
 			removeClient("tag", rule.Client, rule.Tags)
@@ -600,7 +603,7 @@ func applyFirewallRulesLocked() {
 			continue
 		}
 
-		if ruleActive(rule.Condition, rule.Time) {
+		if ruleActive(rule.Disabled, rule.Condition, rule.Time) {
 			addClient("group", rule.Client, rule.Groups)
 		} else {
 			removeClient("group", rule.Client, rule.Groups)
@@ -684,13 +687,6 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if fwd.SrcPort != "" && !re.MatchString(fwd.SrcPort) {
-			if err != nil {
-				http.Error(w, "Invalid OriginalDstPort", 400)
-				return
-			}
-		}
-
 		err = validateClientIdentifier(fwd.Client)
 		if err != nil {
 			http.Error(w, err.Error(), 400)
@@ -706,12 +702,6 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 		err = CIDRorIP(fwd.OriginalDstIP)
 		if err != nil {
 			http.Error(w, "Invalid OriginalDstIP "+err.Error(), 400)
-			return
-		}
-
-		err = CIDRorIP(fwd.SrcIP)
-		if err != nil {
-			http.Error(w, "Invalid SrcIP "+err.Error(), 400)
 			return
 		}
 
@@ -1247,7 +1237,7 @@ func initPFW() {
 	*/
 
 	loadFirewallRules()
-	refreshDataTimer()
+	go refreshDataTimer()
 	ruleTimer()
 }
 
