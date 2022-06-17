@@ -16,7 +16,7 @@ RUN --mount=type=tmpfs,target=/root/go/ (go build -ldflags "-s -w" -o /pfw /code
 FROM ubuntu:21.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update
-RUN apt-get install -y nftables iproute2 netcat inetutils-ping net-tools nano ca-certificates curl
+RUN apt-get install -y nftables iproute2 netcat inetutils-ping net-tools nano ca-certificates curl wireguard-tools
 RUN apt-get install -y hostapd
 COPY scripts /scripts/
 COPY --from=builder /pfw /

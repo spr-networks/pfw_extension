@@ -940,8 +940,27 @@ func modifySiteVPN(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		//tbd validate vpn entry
+		if vpn.PeerPublicKey == "" {
+			http.Error(w, "Missing PeerPublicKey", 400)
+			return
+		}
 
+		if vpn.PublicKey == "" {
+			http.Error(w, "Missing PublicKey", 400)
+			return
+		}
+
+		if vpn.PrivateKey == "" {
+			http.Error(w, "Missing PrivateKey", 400)
+			return
+		}
+
+		if vpn.Endpoint == "" {
+			http.Error(w, "Missing Endpoint", 400)
+			return
+		}
+
+		//optional -> PresharedKey
 	}
 
 	if r.Method == http.MethodDelete {
@@ -1120,6 +1139,7 @@ func applySiteVPNs() {
 	for i, siteVPN := range gFirewallConfig.SiteVPNs {
 		//check if siteVPN is online and happy. if not, remake it
 		currentSite, err := checkSiteVPNIndex(i)
+
 		if err == nil && currentSite == siteVPN {
 			//configuration matches, all done for this one
 			continue
@@ -1557,7 +1577,7 @@ func main() {
 	unix_plugin_router.HandleFunc("/group", modifyGroups).Methods("DELETE", "PUT")
 	unix_plugin_router.HandleFunc("/group/{index:[0-9]+}", modifyGroups).Methods("DELETE", "PUT")
 
-
+	unix_plugin_router.HandleFunc("/sitevpns", modifySiteVPN).Methods("DELETE", "PUT")
 	unix_plugin_router.HandleFunc("/sitevpns/{index:[0-9]+}", modifySiteVPN).Methods("DELETE", "PUT")
 
 
