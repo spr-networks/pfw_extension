@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
@@ -12,10 +13,9 @@ import (
 	"reflect"
 	"regexp"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
-	"strings"
-	"io"
 )
 
 import (
@@ -54,7 +54,7 @@ type PFWRule struct {
 	Expiration int64 //non zero unix time to expire
 	Condition  string
 
-	Disabled	 bool
+	Disabled bool
 }
 
 type BlockRule struct {
@@ -87,11 +87,12 @@ type TagRule struct {
 }
 
 type SiteVPN struct {
-	PeerPublicKey		string
-	PublicKey				string
-	PrivateKey			string
-	PresharedKey		string
-	Endpoint				string
+	Address       string
+	PeerPublicKey string
+	PublicKey     string
+	PrivateKey    string
+	PresharedKey  string
+	Endpoint      string
 }
 
 type FirewallConfig struct {
@@ -100,7 +101,7 @@ type FirewallConfig struct {
 	TagRules        []TagRule
 	GroupRules      []GroupRule
 	Variables       map[string]interface{}
-	SiteVPNs				[]SiteVPN
+	SiteVPNs        []SiteVPN
 	APIToken        string
 }
 
@@ -858,7 +859,6 @@ type KeyPair struct {
 	PublicKey  string
 }
 
-
 // generate a new keypair for a client
 func genKeyPair() (KeyPair, error) {
 	keypair := KeyPair{}
@@ -907,7 +907,6 @@ func genPresharedKey() (string, error) {
 	return PresharedKey, nil
 }
 
-
 func modifySiteVPN(w http.ResponseWriter, r *http.Request) {
 	FWmtx.Lock()
 	defer FWmtx.Unlock()
@@ -937,6 +936,17 @@ func modifySiteVPN(w http.ResponseWriter, r *http.Request) {
 		err := json.NewDecoder(r.Body).Decode(&vpn)
 		if err != nil {
 			http.Error(w, err.Error(), 400)
+			return
+		}
+
+		if vpn.Address == "" {
+			http.Error(w, "Missing Address", 400)
+			return
+		}
+
+		ip := net.ParseIP(vpn.Address)
+		if ip == nil {
+			http.Error(w, "Invalid Address", 400)
 			return
 		}
 
@@ -990,48 +1000,64 @@ func modifySiteVPN(w http.ResponseWriter, r *http.Request) {
 }
 
 func checkSiteVPNIndex(idx int) (SiteVPN, error) {
-		vpn := SiteVPN{}
+	vpn := SiteVPN{}
 
-		dataB, err := exec.Command("wg", "showconf", "site" + strconv.Itoa(idx)).Output()
-		data := string(dataB)
-		if err != nil {
-			return vpn, err
-		}
+	dataB, err := exec.Command("wg", "showconf", "site"+strconv.Itoa(idx)).Output()
+	data := string(dataB)
+	if err != nil {
+		return vpn, err
+	}
 
-		for _, line := range strings.Split(data, "\n") {
-			if strings.Contains(line, "=") {
-				pieces := strings.SplitN(line, "=", 2)
-				if len(pieces) == 2 {
-					pieces[0] = strings.TrimSpace(pieces[0])
-					pieces[1] = strings.TrimSpace(pieces[1])
-					if pieces[0] == "PrivateKey" {
-						vpn.PrivateKey = pieces[1]
-					} else if pieces[0] == "Endpoint" {
-						vpn.Endpoint = pieces[1]
-					} else if pieces[0] == "PublicKey" {
-						vpn.PeerPublicKey = pieces[1]
-					} else if pieces[0] == "PresharedKey" {
-						vpn.PresharedKey = pieces[1]
-					}
+	for _, line := range strings.Split(data, "\n") {
+		if strings.Contains(line, "=") {
+			pieces := strings.SplitN(line, "=", 2)
+			if len(pieces) == 2 {
+				pieces[0] = strings.TrimSpace(pieces[0])
+				pieces[1] = strings.TrimSpace(pieces[1])
+				if pieces[0] == "PrivateKey" {
+					vpn.PrivateKey = pieces[1]
+				} else if pieces[0] == "Endpoint" {
+					vpn.Endpoint = pieces[1]
+				} else if pieces[0] == "PublicKey" {
+					vpn.PeerPublicKey = pieces[1]
+				} else if pieces[0] == "PresharedKey" {
+					vpn.PresharedKey = pieces[1]
 				}
 			}
 		}
+	}
 
-		//grab public key now
-		dataB, err = exec.Command("wg", "show", "site" + strconv.Itoa(idx)).Output()
-		data = string(dataB)
-		if err != nil {
-			return vpn, err
+	//grab public key now
+	dataB, err = exec.Command("wg", "show", "site"+strconv.Itoa(idx)).Output()
+	data = string(dataB)
+	if err != nil {
+		return vpn, err
+	}
+	for _, line := range strings.Split(data, "\n") {
+		if strings.Contains(line, "public key:") {
+			line = strings.TrimSpace(line)
+			pieces := strings.Split(line, "public key: ")
+			vpn.PublicKey = strings.TrimSpace(pieces[1])
 		}
-		for _, line := range strings.Split(data, "\n") {
-			if strings.Contains(line, "public key:") {
-				line = strings.TrimSpace(line)
-				pieces := strings.Split(line, "public key: ")
-				vpn.PublicKey = strings.TrimSpace(pieces[1])
+	}
+
+	//grab ip addr from interface
+	dataB, err = exec.Command("ip", "addr", "show", "site"+strconv.Itoa(idx)).Output()
+	data = string(dataB)
+	if err != nil {
+		return vpn, err
+	}
+	for _, line := range strings.Split(data, "\n") {
+		if strings.Contains(line, "inet") {
+			line = strings.TrimSpace(line)
+			pieces := strings.Split(line, " ")
+			if len(pieces) > 2 {
+				vpn.Address = strings.Split(pieces[1], "/")[0]
 			}
 		}
+	}
 
-		return vpn, nil
+	return vpn, nil
 }
 
 func siteConfigPath(i int) string {
@@ -1059,7 +1085,7 @@ func saveSiteConfig(i int, vpn SiteVPN) error {
 }
 
 func createSiteVPN(i int, vpn SiteVPN) {
-	markidx := strconv.Itoa(1000+i)
+	markidx := strconv.Itoa(1000 + i)
 	idx := strconv.Itoa(i)
 
 	err := saveSiteConfig(i, vpn)
@@ -1068,70 +1094,70 @@ func createSiteVPN(i int, vpn SiteVPN) {
 		return
 	}
 
-	err = exec.Command("ip", "link", "add", "site" + idx, "type", "wireguard").Run()
+	err = exec.Command("ip", "link", "add", "site"+idx, "type", "wireguard").Run()
 	if err != nil {
+		fmt.Println("ip link add site" + idx + " failed")
 		fmt.Println(err)
 		return
 	}
 
-	err = exec.Command("wg", "setconf", "site" + idx, siteConfigPath(i)).Run()
+	err = exec.Command("wg", "setconf", "site"+idx, siteConfigPath(i)).Run()
 	if err != nil {
+		fmt.Println("wg setconf site" + idx + " failed")
 		fmt.Println(err)
 		return
 	}
 
-	err = exec.Command("ip", "link", "set", "site" + idx, "up").Run()
+	err = exec.Command("ip", "addr", "add", vpn.Address, "dev", "site"+idx).Run()
 	if err != nil {
+		fmt.Println("ip addr add " + vpn.Address + " dev site" + idx + " failed")
+		fmt.Println(err)
+		return
+	}
+
+	err = exec.Command("ip", "link", "set", "site"+idx, "up").Run()
+	if err != nil {
+		fmt.Println("ip link set site" + idx + " up failed")
 		fmt.Println(err)
 		return
 	}
 
 	//check nft chain and create it if it does not exist
-	err = exec.Command("nft", "list", "chain", "inet", "mangle", "mark" + markidx).Run()
+	err = exec.Command("nft", "list", "chain", "inet", "mangle", "mark"+markidx).Run()
 	if err != nil {
 		//create it
-		err = exec.Command("nft", "add", "chain", "inet", "mangle", "mark" + markidx).Run()
+		err = exec.Command("nft", "add", "chain", "inet", "mangle", "mark"+markidx).Run()
 		if err != nil {
+			fmt.Println("nft add chain " + markidx + " failed")
 			fmt.Println(err)
 			return
 		}
 
-		err = exec.Command("nft", "add", "rule", "inet", "mangle", "mark" + markidx,
-													"meta", "mark", "set", idx).Run()
+		err = exec.Command("nft", "add", "rule", "inet", "mangle", "mark"+markidx,
+			"meta", "mark", "set", idx).Run()
 		if err != nil {
 			//delete the chain
-			exec.Command("nft", "delete", "chain", "inet", "mangle", "mark" + markidx).Run()
+			err = exec.Command("nft", "delete", "chain", "inet", "mangle", "mark"+markidx).Run()
+			fmt.Println("failed to add rule for mark" + markidx)
 			fmt.Println(err)
 			return
 		}
 	}
 
-
 	//add policy-based routes
-	err = exec.Command("ip", "-4", "route", "add", "0.0.0.0/0", "dev", "site" + idx, "table", markidx).Run()
+	err = exec.Command("ip", "-4", "route", "add", "0.0.0.0/0", "dev", "site"+idx, "table", markidx).Run()
 	if err != nil {
+		fmt.Println("failed to add site" + idx + " table")
 		fmt.Println(err)
 		return
 	}
 
 	err = exec.Command("ip", "-4", "rule", "add", "from", "all", "fwmark", markidx, "table", markidx).Run()
 	if err != nil {
+		fmt.Println("failed to add site" + idx + " fwmark rule")
 		fmt.Println(err)
 		return
 	}
-
-/*
-- ip link add site0 type wireguard
-- wg set site0 peer publicKey allowed-ips 0.0.0.0/0 endpoint endpoint:51820
-- ip link set site0 up
-- wg set site0 private-key ./privkey
-
-- nft add chain inet mangle mark1000
-- nft add rule inet mangle mark1000 meta mark set 1000
-
-- ip -4 route add 0.0.0.0/0 dev site4 table 1000
-- ip -4 rule add from all fwmark 1000 table 1000
-*/
 
 }
 
@@ -1145,71 +1171,18 @@ func applySiteVPNs() {
 			continue
 		} else {
 			//destroy the interface and re-create it
-			exec.Command("ip", "link", "del", "site" + strconv.Itoa(i)).Run()
+			exec.Command("ip", "link", "del", "site"+strconv.Itoa(i)).Run()
 			createSiteVPN(i, siteVPN)
 		}
 	}
 
 }
+
 /*
 
-ip link add site0 type wireguard
-wg set site0 peer publicKey allowed-ips 0.0.0.0/0 endpoint endpoint:51820
-ip link set site0 up
-wg set site0 private-key ./privkey
-nft add chain inet mangle mark1000
-nft add rule inet mangle mark1000 meta mark set 1000
-ip -4 route add 0.0.0.0/0 dev site4 table 1000
-ip -4 rule add from all fwmark 1000 table 1000
+tbd verdict maps  for site forward
 
-
-okay yeah now it works...so probalby have to generate a config file w/ all the interfaces.
-
-
-and for routing:
-
-
-oiifname "site*" counter masquerade
-
-
-chain marked_routing {
- comment "mark all traffic for sbr routing table"
- type filter hook prerouting priority -150;
- ip  daddr "157.230.10.143" meta mark set 1000
-}
-
-
-ip -4 route add 0.0.0.0/0 dev site0 table 1000
-ip -4 rule add from all fwmark 1000 table 1000
-
-okay so with just these it is not forwarding to site0 from the clients.
-how to fix?
-
-do we allow from *?
-do we allow from a specific peer?
-	-> verdict map for the forwarding i think.
-
-oiifname "site*" counter masquerade
-
-
-ok waht is command to add the meta mark set chain?
-
-
-table inet mangle
-
-nft add chain inet mangle mark1004
-nft add rule inet mangle mark1004 meta mark set 1004
-ip -4 route add 0.0.0.0/0 dev site4 table 1004
-ip -4 rule add from all fwmark 1004 table 1004
-
-on remote:
-	iptables -t nat -A POSTROUTING -s 192.168.100.0/24 -o eth0 -j MASQUERADE
-
-
-
-
-	Big Q: if we use allowed-ips of 0.0.0.0/0, can it mac spoof into our own network ?
-	Answer: no. need to blcok site vpn from hitting 2 2etc. done*/
+*/
 
 func handleVariable(w http.ResponseWriter, r *http.Request) {
 	FWmtx.Lock()
@@ -1255,7 +1228,6 @@ func handleVariable(w http.ResponseWriter, r *http.Request) {
 		saveFirewallRulesLocked()
 	}
 }
-
 
 func testExpression(w http.ResponseWriter, r *http.Request) {
 	FWmtx.RLock()
@@ -1579,7 +1551,6 @@ func main() {
 
 	unix_plugin_router.HandleFunc("/sitevpns", modifySiteVPN).Methods("DELETE", "PUT")
 	unix_plugin_router.HandleFunc("/sitevpns/{index:[0-9]+}", modifySiteVPN).Methods("DELETE", "PUT")
-
 
 	os.Remove(UNIX_PLUGIN_LISTENER)
 	unixPluginListener, err := net.Listen("unix", UNIX_PLUGIN_LISTENER)
