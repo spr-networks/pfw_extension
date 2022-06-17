@@ -34,6 +34,7 @@ type ClientIdentifier struct {
 	Identity string
 	Group    string
 	SrcIP    string
+	Tag 		 string
 }
 
 type TimeExpression struct {
@@ -157,6 +158,9 @@ func validateClientIdentifier(client ClientIdentifier) error {
 	if client.Group != "" {
 		count += 1
 	}
+	if client.Tag != "" {
+		count += 1
+	}
 	if client.Identity != "" {
 		count += 1
 	}
@@ -180,6 +184,11 @@ func validateClientIdentifier(client ClientIdentifier) error {
 	if client.Group != "" {
 		//check that the group is in the device
 	}
+
+	if client.Tag != "" {
+		//check that the group is in the device
+	}
+
 
 	return nil
 }
@@ -303,6 +312,21 @@ func clientIPs(client ClientIdentifier) []string {
 		for _, entry := range devices {
 			for _, group := range entry.Groups {
 				if group == client.Group && entry.RecentIP != "" {
+					ips = append(ips, entry.RecentIP)
+					break
+				}
+			}
+		}
+		return ips
+	}
+
+
+	if client.Tag != "" {
+		ips := []string{}
+
+		for _, entry := range devices {
+			for _, tag := range entry.DeviceTags {
+				if tag == client.Tag && entry.RecentIP != "" {
 					ips = append(ips, entry.RecentIP)
 					break
 				}
@@ -1181,6 +1205,17 @@ func applySiteVPNs() {
 /*
 
 tbd verdict maps  for site forward
+
+// src ip . dst_ip --> verdict is goto mark1000 to f.ex. go to site inetrace with mark/table 1000
+
+map site_dest {
+	type ipv4_addr . ipv4_addr : verdict;
+	flags interval
+}
+
+//tbd:
+need to update ForwardingRule to apply when DstInterface is set.
+
 
 */
 
