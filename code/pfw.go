@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+	"strings"
+	"io"
 )
 
 import (
@@ -84,16 +86,25 @@ type TagRule struct {
 	Tags []string
 }
 
+type SiteVPN struct {
+	PeerPublicKey		string
+	PublicKey				string
+	PrivateKey			string
+	PresharedKey		string
+	Endpoint				string
+}
+
 type FirewallConfig struct {
 	ForwardingRules []ForwardingRule
 	BlockRules      []BlockRule
 	TagRules        []TagRule
 	GroupRules      []GroupRule
 	Variables       map[string]interface{}
+	SiteVPNs				[]SiteVPN
 	APIToken        string
 }
 
-var gFirewallConfig = FirewallConfig{[]ForwardingRule{}, []BlockRule{}, []TagRule{}, []GroupRule{}, map[string]interface{}{}, ""}
+var gFirewallConfig = FirewallConfig{[]ForwardingRule{}, []BlockRule{}, []TagRule{}, []GroupRule{}, map[string]interface{}{}, []SiteVPN{}, ""}
 
 func logRequest(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -842,6 +853,344 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 	saveFirewallRulesLocked()
 }
 
+type KeyPair struct {
+	PrivateKey string
+	PublicKey  string
+}
+
+
+// generate a new keypair for a client
+func genKeyPair() (KeyPair, error) {
+	keypair := KeyPair{}
+
+	cmd := exec.Command("wg", "genkey")
+	stdout, err := cmd.Output()
+	if err != nil {
+		fmt.Println("wg genkey failed", err)
+		return keypair, err
+	}
+
+	keypair.PrivateKey = strings.TrimSuffix(string(stdout), "\n")
+
+	cmd = exec.Command("wg", "pubkey")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		fmt.Println("wg pubkey failed", err)
+		return keypair, err
+	}
+
+	go func() {
+		defer stdin.Close()
+		io.WriteString(stdin, keypair.PrivateKey+"\n")
+	}()
+
+	pubkey, err := cmd.Output()
+	if err != nil {
+		fmt.Println("wg pubkey failed: bad key", err)
+		return keypair, err
+	}
+
+	keypair.PublicKey = strings.TrimSuffix(string(pubkey), "\n")
+
+	return keypair, nil
+}
+
+func genPresharedKey() (string, error) {
+	cmd := exec.Command("wg", "genpsk")
+	stdout, err := cmd.Output()
+	if err != nil {
+		fmt.Println("wg genpsk failed", err)
+		return "", err
+	}
+
+	PresharedKey := strings.TrimSuffix(string(stdout), "\n")
+	return PresharedKey, nil
+}
+
+
+func modifySiteVPN(w http.ResponseWriter, r *http.Request) {
+	FWmtx.Lock()
+	defer FWmtx.Unlock()
+
+	vars := mux.Vars(r)
+	indexStr, index_ok := vars["index"]
+	index := 0
+	vpn := SiteVPN{}
+
+	if index_ok {
+		val, err := strconv.Atoi(indexStr)
+		if err != nil {
+			http.Error(w, "invalid index", 400)
+			return
+		}
+		index = val
+		if index < 0 || index >= len(gFirewallConfig.SiteVPNs) {
+			http.Error(w, "invalid index", 400)
+			return
+		}
+	}
+
+	if index_ok && r.Method == http.MethodDelete {
+		//for delete retrieve the existing entry, do not decode.
+		vpn = gFirewallConfig.SiteVPNs[index]
+	} else {
+		err := json.NewDecoder(r.Body).Decode(&vpn)
+		if err != nil {
+			http.Error(w, err.Error(), 400)
+			return
+		}
+
+		//tbd validate vpn entry
+
+	}
+
+	if r.Method == http.MethodDelete {
+		for i := range gFirewallConfig.SiteVPNs {
+			a := gFirewallConfig.SiteVPNs[i]
+			if vpn == a {
+				gFirewallConfig.SiteVPNs = append(gFirewallConfig.SiteVPNs[:i], gFirewallConfig.SiteVPNs[i+1:]...)
+				saveFirewallRulesLocked()
+
+				applySiteVPNs()
+				return
+			}
+		}
+		http.Error(w, "Not found", 404)
+		return
+	}
+
+	if index_ok {
+		gFirewallConfig.SiteVPNs[index] = vpn
+	} else {
+		gFirewallConfig.SiteVPNs = append(gFirewallConfig.SiteVPNs, vpn)
+	}
+
+	applySiteVPNs()
+
+	saveFirewallRulesLocked()
+}
+
+func checkSiteVPNIndex(idx int) (SiteVPN, error) {
+		vpn := SiteVPN{}
+
+		dataB, err := exec.Command("wg", "showconf", "site" + strconv.Itoa(idx)).Output()
+		data := string(dataB)
+		if err != nil {
+			return vpn, err
+		}
+
+		for _, line := range strings.Split(data, "\n") {
+			if strings.Contains(line, "=") {
+				pieces := strings.SplitN(line, "=", 2)
+				if len(pieces) == 2 {
+					pieces[0] = strings.TrimSpace(pieces[0])
+					pieces[1] = strings.TrimSpace(pieces[1])
+					if pieces[0] == "PrivateKey" {
+						vpn.PrivateKey = pieces[1]
+					} else if pieces[0] == "Endpoint" {
+						vpn.Endpoint = pieces[1]
+					} else if pieces[0] == "PublicKey" {
+						vpn.PeerPublicKey = pieces[1]
+					} else if pieces[0] == "PresharedKey" {
+						vpn.PresharedKey = pieces[1]
+					}
+				}
+			}
+		}
+
+		//grab public key now
+		dataB, err = exec.Command("wg", "show", "site" + strconv.Itoa(idx)).Output()
+		data = string(dataB)
+		if err != nil {
+			return vpn, err
+		}
+		for _, line := range strings.Split(data, "\n") {
+			if strings.Contains(line, "public key:") {
+				line = strings.TrimSpace(line)
+				pieces := strings.Split(line, "public key: ")
+				vpn.PublicKey = strings.TrimSpace(pieces[1])
+			}
+		}
+
+		return vpn, nil
+}
+
+func siteConfigPath(i int) string {
+	idx := strconv.Itoa(i)
+	return TEST_PREFIX + "/configs/pfw/site" + idx + ".conf"
+}
+
+func saveSiteConfig(i int, vpn SiteVPN) error {
+	filePath := siteConfigPath(i)
+	config := fmt.Sprintf("[Interface]\nPrivateKey = %s\n\n", vpn.PrivateKey)
+	config += fmt.Sprintf("[Peer]\nPublicKey = %s\nAllowedIPs = 0.0.0.0/0\nEndpoint = %s\n",
+		vpn.PeerPublicKey, vpn.Endpoint)
+
+	if vpn.PresharedKey != "" {
+		config += fmt.Sprintf("PresharedKey = %s\n", vpn.PresharedKey)
+	}
+
+	err := ioutil.WriteFile(filePath, []byte(config), 0600)
+	if err != nil {
+		return err
+	}
+
+	return nil
+
+}
+
+func createSiteVPN(i int, vpn SiteVPN) {
+	markidx := strconv.Itoa(1000+i)
+	idx := strconv.Itoa(i)
+
+	err := saveSiteConfig(i, vpn)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	err = exec.Command("ip", "link", "add", "site" + idx, "type", "wireguard").Run()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	err = exec.Command("wg", "setconf", "site" + idx, siteConfigPath(i)).Run()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	err = exec.Command("ip", "link", "set", "site" + idx, "up").Run()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	//check nft chain and create it if it does not exist
+	err = exec.Command("nft", "list", "chain", "inet", "mangle", "mark" + markidx).Run()
+	if err != nil {
+		//create it
+		err = exec.Command("nft", "add", "chain", "inet", "mangle", "mark" + markidx).Run()
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+
+		err = exec.Command("nft", "add", "rule", "inet", "mangle", "mark" + markidx,
+													"meta", "mark", "set", idx).Run()
+		if err != nil {
+			//delete the chain
+			exec.Command("nft", "delete", "chain", "inet", "mangle", "mark" + markidx).Run()
+			fmt.Println(err)
+			return
+		}
+	}
+
+
+	//add policy-based routes
+	err = exec.Command("ip", "-4", "route", "add", "0.0.0.0/0", "dev", "site" + idx, "table", markidx).Run()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	err = exec.Command("ip", "-4", "rule", "add", "from", "all", "fwmark", markidx, "table", markidx).Run()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+
+/*
+- ip link add site0 type wireguard
+- wg set site0 peer publicKey allowed-ips 0.0.0.0/0 endpoint endpoint:51820
+- ip link set site0 up
+- wg set site0 private-key ./privkey
+
+- nft add chain inet mangle mark1000
+- nft add rule inet mangle mark1000 meta mark set 1000
+
+- ip -4 route add 0.0.0.0/0 dev site4 table 1000
+- ip -4 rule add from all fwmark 1000 table 1000
+*/
+
+}
+
+func applySiteVPNs() {
+	for i, siteVPN := range gFirewallConfig.SiteVPNs {
+		//check if siteVPN is online and happy. if not, remake it
+		currentSite, err := checkSiteVPNIndex(i)
+		if err == nil && currentSite == siteVPN {
+			//configuration matches, all done for this one
+			continue
+		} else {
+			//destroy the interface and re-create it
+			exec.Command("ip", "link", "del", "site" + strconv.Itoa(i)).Run()
+			createSiteVPN(i, siteVPN)
+		}
+	}
+
+}
+/*
+
+ip link add site0 type wireguard
+wg set site0 peer publicKey allowed-ips 0.0.0.0/0 endpoint endpoint:51820
+ip link set site0 up
+wg set site0 private-key ./privkey
+nft add chain inet mangle mark1000
+nft add rule inet mangle mark1000 meta mark set 1000
+ip -4 route add 0.0.0.0/0 dev site4 table 1000
+ip -4 rule add from all fwmark 1000 table 1000
+
+
+okay yeah now it works...so probalby have to generate a config file w/ all the interfaces.
+
+
+and for routing:
+
+
+oiifname "site*" counter masquerade
+
+
+chain marked_routing {
+ comment "mark all traffic for sbr routing table"
+ type filter hook prerouting priority -150;
+ ip  daddr "157.230.10.143" meta mark set 1000
+}
+
+
+ip -4 route add 0.0.0.0/0 dev site0 table 1000
+ip -4 rule add from all fwmark 1000 table 1000
+
+okay so with just these it is not forwarding to site0 from the clients.
+how to fix?
+
+do we allow from *?
+do we allow from a specific peer?
+	-> verdict map for the forwarding i think.
+
+oiifname "site*" counter masquerade
+
+
+ok waht is command to add the meta mark set chain?
+
+
+table inet mangle
+
+nft add chain inet mangle mark1004
+nft add rule inet mangle mark1004 meta mark set 1004
+ip -4 route add 0.0.0.0/0 dev site4 table 1004
+ip -4 rule add from all fwmark 1004 table 1004
+
+on remote:
+	iptables -t nat -A POSTROUTING -s 192.168.100.0/24 -o eth0 -j MASQUERADE
+
+
+
+
+	Big Q: if we use allowed-ips of 0.0.0.0/0, can it mac spoof into our own network ?
+	Answer: no. need to blcok site vpn from hitting 2 2etc. done*/
+
 func handleVariable(w http.ResponseWriter, r *http.Request) {
 	FWmtx.Lock()
 	defer FWmtx.Unlock()
@@ -886,6 +1235,7 @@ func handleVariable(w http.ResponseWriter, r *http.Request) {
 		saveFirewallRulesLocked()
 	}
 }
+
 
 func testExpression(w http.ResponseWriter, r *http.Request) {
 	FWmtx.RLock()
@@ -1185,58 +1535,8 @@ func modifyGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 func initPFW() {
-
-	/*
-			inet filter
-
-		  map fwd_block {
-		    type ipv4_addr . ipv4_addr . inet_proto . inet_service : verdict;
-		    flags interval
-		  }
-
-			chain PFWDROPLOG {
-				counter log prefix "DRP:PFW "
-				counter drop
-			}
-
-			-> after clamping we want these rules. we could add a jump to PFW chain
-			# MSS clamping to handle upstream MTU limitations
-			tcp flags syn tcp option maxseg size set rt mtu
-
-			mb jump
-			counter ip saddr . ip daddr . ip protocol . tcp dport vmap @fwd_block
-			counter ip saddr . ip daddr . ip protocol . udp dport vmap @fwd_block
-
-			//goto PFWDROPLOG
-
-
-
-
-
-
-			inet nat
-
-			map dnat_tcp_ipmap {
-				type ipv4_addr . ipv4_addr . inet_service : ipv4_addr
-			}
-
-			map dnat_tcp_portmap {
-				type ipv4_addr . ipv4_addr . inet_service : inet_service
-			}
-
-			map dnat_udp_ipmap {
-				type ipv4_addr . ipv4_addr . inet_service : ipv4_addr
-			}
-
-			map dnat_udp_portmap {
-				type ipv4_addr . ipv4_addr . inet_service : inet_service
-			}
-
-
-
-	*/
-
 	loadFirewallRules()
+	applySiteVPNs()
 	go refreshDataTimer()
 	ruleTimer()
 }
@@ -1256,6 +1556,10 @@ func main() {
 	unix_plugin_router.HandleFunc("/tag/{index:[0-9]+}", modifyTags).Methods("DELETE", "PUT")
 	unix_plugin_router.HandleFunc("/group", modifyGroups).Methods("DELETE", "PUT")
 	unix_plugin_router.HandleFunc("/group/{index:[0-9]+}", modifyGroups).Methods("DELETE", "PUT")
+
+
+	unix_plugin_router.HandleFunc("/sitevpns/{index:[0-9]+}", modifySiteVPN).Methods("DELETE", "PUT")
+
 
 	os.Remove(UNIX_PLUGIN_LISTENER)
 	unixPluginListener, err := net.Listen("unix", UNIX_PLUGIN_LISTENER)
