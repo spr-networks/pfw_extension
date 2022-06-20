@@ -383,9 +383,8 @@ func isForwardingInstalled(fwd ForwardingRule, clientIP string) bool {
 
 	if fwd.DstInterface != "" {
 		//if a destination interface is set, only check clientIP and OriginalDstIP
-		cmd = exec.Command("nft", "get", "element", "inet", "filter", "site_forward", "{",
-			clientIP, ".", fwd.OriginalDstIP, ":", "accept", "}")
-
+		cmd = exec.Command("nft", "get", "element", "inet", "mangle", "site_forward_mangle", "{",
+			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark" + fwdDstIfaceToIndex(fwd.DstInterface), "}")
 	} else {
 		if fwd.OriginalDstPort != "" {
 			cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
@@ -421,20 +420,8 @@ func addForwarding(fwd ForwardingRule, clientIP string) error {
 
 	if fwd.DstInterface != "" {
 		//if a destination interface is set, only check clientIP and OriginalDstIP
-
-		cmd = exec.Command("nft", "add", "element", "inet", "filter", "site_forward", "{",
-			clientIP, ".", fwd.OriginalDstIP, ":", "accept", "}")
-
-		err := cmd.Run()
-		if err != nil {
-			fmt.Println("failed to add element", err)
-			fmt.Println(cmd)
-			return err
-		}
-
 		cmd = exec.Command("nft", "add", "element", "inet", "mangle", "site_forward_mangle", "{",
 			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark" + fwdDstIfaceToIndex(fwd.DstInterface), "}")
-
 	} else {
 
 		if fwd.OriginalDstPort != "" {
@@ -471,20 +458,8 @@ func deleteForwarding(fwd ForwardingRule, clientIP string) error {
 
 	if fwd.DstInterface != "" {
 		//if a destination interface is set, only check clientIP and OriginalDstIP
-
-		cmd = exec.Command("nft", "delete", "element", "inet", "filter", "site_forward", "{",
-			clientIP, ".", fwd.OriginalDstIP, ":", "accept", "}")
-
-		err := cmd.Run()
-		if err != nil {
-			fmt.Println("failed to add element", err)
-			fmt.Println(cmd)
-			return err
-		}
-
 		cmd = exec.Command("nft", "delete", "element", "inet", "mangle", "site_forward_mangle", "{",
 			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark" + fwdDstIfaceToIndex(fwd.DstInterface), "}")
-
 	} else {
 
 		if fwd.OriginalDstPort != "" {
