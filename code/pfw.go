@@ -407,12 +407,19 @@ func isForwardingInstalled(fwd ForwardingRule, clientIP string) bool {
 }
 
 
+var SiteMarkOffset = 1000
+
 func fwdDstIfaceToIndex(iface string) string {
 	if !strings.HasPrefix(iface, "site") {
 		return ""
 	}
 
-	return iface[4:]
+	val, err := strconv.Atoi(iface[4:])
+	if err != nil {
+		return ""
+	}
+
+	return strconv.Itoa(val + SiteMarkOffset)
 }
 
 func addForwarding(fwd ForwardingRule, clientIP string) error {
@@ -1089,6 +1096,12 @@ func checkSiteVPNIndex(idx int) (SiteVPN, error) {
 		return vpn, err
 	}
 
+	//check that the mark chain exists
+	err = exec.Command("nft", "list", "chain", "inet", "mangle", "mark"+strconv.Itoa(idx + SiteMarkOffset)).Run()
+	if err != nil {
+		return vpn, err
+	}
+
 	for _, line := range strings.Split(data, "\n") {
 		if strings.Contains(line, "=") {
 			pieces := strings.SplitN(line, "=", 2)
@@ -1166,7 +1179,7 @@ func saveSiteConfig(i int, vpn SiteVPN) error {
 }
 
 func createSiteVPN(i int, vpn SiteVPN) {
-	markidx := strconv.Itoa(1000 + i)
+	markidx := strconv.Itoa(SiteMarkOffset + i)
 	idx := strconv.Itoa(i)
 
 	err := saveSiteConfig(i, vpn)
@@ -1215,7 +1228,7 @@ func createSiteVPN(i int, vpn SiteVPN) {
 		}
 
 		err = exec.Command("nft", "add", "rule", "inet", "mangle", "mark"+markidx,
-			"meta", "mark", "set", idx).Run()
+			"meta", "mark", "set", markidx).Run()
 		if err != nil {
 			//delete the chain
 			err = exec.Command("nft", "delete", "chain", "inet", "mangle", "mark"+markidx).Run()
@@ -1246,7 +1259,6 @@ func applySiteVPNs() {
 	for i, siteVPN := range gFirewallConfig.SiteVPNs {
 		//check if siteVPN is online and happy. if not, remake it
 		currentSite, err := checkSiteVPNIndex(i)
-
 		if err == nil && currentSite == siteVPN {
 			//configuration matches, all done for this one
 			continue
