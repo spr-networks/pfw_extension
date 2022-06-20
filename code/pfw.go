@@ -381,14 +381,22 @@ func deleteBlock(br BlockRule, clientIP string) error {
 func isForwardingInstalled(fwd ForwardingRule, clientIP string) bool {
 	var cmd *exec.Cmd
 
-	if fwd.OriginalDstPort != "" {
-		cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
-			clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+	if fwd.DstInterface != "" {
+		//if a destination interface is set, only check clientIP and OriginalDstIP
+		cmd = exec.Command("nft", "get", "element", "inet", "filter", "site_forward", "{",
+			clientIP, ".", fwd.OriginalDstIP, ":", "accept", "}")
 
 	} else {
-		cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
-			clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+		if fwd.OriginalDstPort != "" {
+			cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
+				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+
+		} else {
+			cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
+				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+		}
 	}
+
 
 	err := cmd.Run()
 
@@ -399,12 +407,23 @@ func isForwardingInstalled(fwd ForwardingRule, clientIP string) bool {
 	}
 }
 
+
+func fwdDstIfaceToIndex(iface string) string {
+	if !strings.HasPrefix(iface, "site") {
+		return ""
+	}
+
+	return iface[4:]
+}
+
 func addForwarding(fwd ForwardingRule, clientIP string) error {
 	var cmd *exec.Cmd
 
-	if fwd.OriginalDstPort != "" {
-		cmd = exec.Command("nft", "add", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
-			clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+	if fwd.DstInterface != "" {
+		//if a destination interface is set, only check clientIP and OriginalDstIP
+
+		cmd = exec.Command("nft", "add", "element", "inet", "filter", "site_forward", "{",
+			clientIP, ".", fwd.OriginalDstIP, ":", "accept", "}")
 
 		err := cmd.Run()
 		if err != nil {
@@ -413,12 +432,29 @@ func addForwarding(fwd ForwardingRule, clientIP string) error {
 			return err
 		}
 
-		cmd = exec.Command("nft", "add", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_portmap", "{",
-			clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstPort, "}")
+		cmd = exec.Command("nft", "add", "element", "inet", "mangle", "site_forward_mangle", "{",
+			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark" + fwdDstIfaceToIndex(fwd.DstInterface), "}")
 
 	} else {
-		cmd = exec.Command("nft", "add", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
-			clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+
+		if fwd.OriginalDstPort != "" {
+			cmd = exec.Command("nft", "add", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
+				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+
+			err := cmd.Run()
+			if err != nil {
+				fmt.Println("failed to add element", err)
+				fmt.Println(cmd)
+				return err
+			}
+
+			cmd = exec.Command("nft", "add", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_portmap", "{",
+				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstPort, "}")
+
+		} else {
+			cmd = exec.Command("nft", "add", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
+				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+		}
 	}
 
 	err := cmd.Run()
@@ -433,22 +469,41 @@ func addForwarding(fwd ForwardingRule, clientIP string) error {
 func deleteForwarding(fwd ForwardingRule, clientIP string) error {
 	var cmd *exec.Cmd
 
-	if fwd.OriginalDstPort != "" {
-		cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
-			clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+	if fwd.DstInterface != "" {
+		//if a destination interface is set, only check clientIP and OriginalDstIP
+
+		cmd = exec.Command("nft", "delete", "element", "inet", "filter", "site_forward", "{",
+			clientIP, ".", fwd.OriginalDstIP, ":", "accept", "}")
 
 		err := cmd.Run()
 		if err != nil {
-			fmt.Println("failed to delete element", err)
+			fmt.Println("failed to add element", err)
 			fmt.Println(cmd)
+			return err
 		}
 
-		cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_portmap", "{",
-			clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstPort, "}")
+		cmd = exec.Command("nft", "delete", "element", "inet", "mangle", "site_forward_mangle", "{",
+			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark" + fwdDstIfaceToIndex(fwd.DstInterface), "}")
 
 	} else {
-		cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
-			clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+
+		if fwd.OriginalDstPort != "" {
+			cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
+				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+
+			err := cmd.Run()
+			if err != nil {
+				fmt.Println("failed to delete element", err)
+				fmt.Println(cmd)
+			}
+
+			cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_portmap", "{",
+				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstPort, "}")
+
+		} else {
+			cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
+				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+		}
 	}
 
 	err := cmd.Run()
@@ -702,36 +757,64 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if fwd.Protocol != "tcp" && fwd.Protocol != "udp" {
-			http.Error(w, "Invalid protocol", 400)
-			return
-		}
-
-		re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
-
-		if fwd.DstPort != "" && !re.MatchString(fwd.DstPort) {
-			if err != nil {
-				http.Error(w, "Invalid DstPort", 400)
+		//for now only support interfaces named siteX
+		if fwd.DstInterface != "" {
+			if !strings.HasPrefix(fwd.DstInterface, "site") {
+				http.Error(w, "Forwarding Interfaces must start with site[0-9]+ "+err.Error(), 400)
 				return
 			}
-		}
 
-		if fwd.OriginalDstPort != "" && !re.MatchString(fwd.OriginalDstPort) {
-			if err != nil {
-				http.Error(w, "Invalid OriginalDstPort", 400)
+			dst_idx := fwdDstIfaceToIndex(fwd.DstInterface)
+			if dst_idx == "" {
+				http.Error(w, "Forwarding Interfaces must start with site[0-9]+ "+err.Error(), 400)
 				return
 			}
+
+			if fwd.DstPort != "" || fwd.OriginalDstPort != "" {
+				http.Error(w, "When a DstInterface is set, DstPort is not supported", 400)
+				return
+			}
+
+			if fwd.DstIP != "" {
+				http.Error(w, "When a DstInterface is set, DstIP rewriting is not supported", 400)
+				return
+			}
+		} else {
+			//ports and new DstIp only needed if there is no DstInterface
+
+			if fwd.Protocol != "tcp" && fwd.Protocol != "udp" {
+				http.Error(w, "Invalid protocol", 400)
+				return
+			}
+
+			re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
+
+			if fwd.DstPort != "" && !re.MatchString(fwd.DstPort) {
+				if err != nil {
+					http.Error(w, "Invalid DstPort", 400)
+					return
+				}
+			}
+
+			if fwd.OriginalDstPort != "" && !re.MatchString(fwd.OriginalDstPort) {
+				if err != nil {
+					http.Error(w, "Invalid OriginalDstPort", 400)
+					return
+				}
+			}
+
+			ip := net.ParseIP(fwd.DstIP)
+			if ip == nil {
+				http.Error(w, "Invalid DstIP", 400)
+				return
+			}
+
 		}
+
 
 		err = validateClientIdentifier(fwd.Client)
 		if err != nil {
 			http.Error(w, err.Error(), 400)
-			return
-		}
-
-		ip := net.ParseIP(fwd.DstIP)
-		if ip == nil {
-			http.Error(w, "Invalid DstIP", 400)
 			return
 		}
 
@@ -740,7 +823,6 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Invalid OriginalDstIP "+err.Error(), 400)
 			return
 		}
-
 	}
 
 	if r.Method == http.MethodDelete {
