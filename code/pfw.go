@@ -995,6 +995,28 @@ func genPresharedKey() (string, error) {
 	return PresharedKey, nil
 }
 
+func privateToPubkey(privkey string) (string, error) {
+	cmd := exec.Command("wg", "pubkey")
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		fmt.Println("wg pubkey failed", err)
+		return "", err
+	}
+
+	go func() {
+		defer stdin.Close()
+		io.WriteString(stdin, privkey+"\n")
+	}()
+
+	pubkey, err := cmd.Output()
+	if err != nil {
+		fmt.Println("wg pubkey failed: bad key", err)
+		return "", err
+	}
+
+	return strings.TrimSuffix(string(pubkey), "\n"), nil
+}
+
 func modifySiteVPN(w http.ResponseWriter, r *http.Request) {
 	FWmtx.Lock()
 	defer FWmtx.Unlock()
@@ -1043,11 +1065,6 @@ func modifySiteVPN(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		if vpn.PublicKey == "" {
-			http.Error(w, "Missing PublicKey", 400)
-			return
-		}
-
 		if vpn.PrivateKey == "" {
 			http.Error(w, "Missing PrivateKey", 400)
 			return
@@ -1058,6 +1075,14 @@ func modifySiteVPN(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		if vpn.PublicKey == "" {
+			vpn.PublicKey, err = privateToPubkey(vpn.PrivateKey)
+			if err != nil {
+				http.Error(w, "Could not derive PublicKey from PrivateKey: " + err.Error(), 400)
+				return
+			}
+		}
+
 		//optional -> PresharedKey
 	}
 
@@ -1066,8 +1091,11 @@ func modifySiteVPN(w http.ResponseWriter, r *http.Request) {
 			a := gFirewallConfig.SiteVPNs[i]
 			if vpn == a {
 				gFirewallConfig.SiteVPNs = append(gFirewallConfig.SiteVPNs[:i], gFirewallConfig.SiteVPNs[i+1:]...)
-				saveFirewallRulesLocked()
 
+				//delete interface
+				exec.Command("ip", "link", "del", "site"+strconv.Itoa(i)).Run()
+
+				saveFirewallRulesLocked()
 				applySiteVPNs()
 				return
 			}
