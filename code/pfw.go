@@ -34,7 +34,7 @@ type ClientIdentifier struct {
 	Identity string
 	Group    string
 	SrcIP    string
-	Tag 		 string
+	Tag      string
 }
 
 type TimeExpression struct {
@@ -189,7 +189,6 @@ func validateClientIdentifier(client ClientIdentifier) error {
 		//check that the group is in the device
 	}
 
-
 	return nil
 }
 
@@ -320,7 +319,6 @@ func clientIPs(client ClientIdentifier) []string {
 		return ips
 	}
 
-
 	if client.Tag != "" {
 		ips := []string{}
 
@@ -384,7 +382,7 @@ func isForwardingInstalled(fwd ForwardingRule, clientIP string) bool {
 	if fwd.DstInterface != "" {
 		//if a destination interface is set, only check clientIP and OriginalDstIP
 		cmd = exec.Command("nft", "get", "element", "inet", "mangle", "site_forward_mangle", "{",
-			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark" + fwdDstIfaceToIndex(fwd.DstInterface), "}")
+			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+fwdDstIfaceToIndex(fwd.DstInterface), "}")
 	} else {
 		if fwd.OriginalDstPort != "" {
 			cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
@@ -396,7 +394,6 @@ func isForwardingInstalled(fwd ForwardingRule, clientIP string) bool {
 		}
 	}
 
-
 	err := cmd.Run()
 
 	if err != nil {
@@ -405,7 +402,6 @@ func isForwardingInstalled(fwd ForwardingRule, clientIP string) bool {
 		return true
 	}
 }
-
 
 var SiteMarkOffset = 1000
 
@@ -428,7 +424,7 @@ func addForwarding(fwd ForwardingRule, clientIP string) error {
 	if fwd.DstInterface != "" {
 		//if a destination interface is set, only check clientIP and OriginalDstIP
 		cmd = exec.Command("nft", "add", "element", "inet", "mangle", "site_forward_mangle", "{",
-			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark" + fwdDstIfaceToIndex(fwd.DstInterface), "}")
+			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+fwdDstIfaceToIndex(fwd.DstInterface), "}")
 	} else {
 
 		if fwd.OriginalDstPort != "" {
@@ -466,7 +462,7 @@ func deleteForwarding(fwd ForwardingRule, clientIP string) error {
 	if fwd.DstInterface != "" {
 		//if a destination interface is set, only check clientIP and OriginalDstIP
 		cmd = exec.Command("nft", "delete", "element", "inet", "mangle", "site_forward_mangle", "{",
-			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark" + fwdDstIfaceToIndex(fwd.DstInterface), "}")
+			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+fwdDstIfaceToIndex(fwd.DstInterface), "}")
 	} else {
 
 		if fwd.OriginalDstPort != "" {
@@ -723,7 +719,7 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		index = val
-		if index < 0 || index >= len(gFirewallConfig.BlockRules) {
+		if index < 0 || index >= len(gFirewallConfig.ForwardingRules) {
 			http.Error(w, "invalid index", 400)
 			return
 		}
@@ -792,7 +788,6 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 			}
 
 		}
-
 
 		err = validateClientIdentifier(fwd.Client)
 		if err != nil {
@@ -1078,7 +1073,7 @@ func modifySiteVPN(w http.ResponseWriter, r *http.Request) {
 		if vpn.PublicKey == "" {
 			vpn.PublicKey, err = privateToPubkey(vpn.PrivateKey)
 			if err != nil {
-				http.Error(w, "Could not derive PublicKey from PrivateKey: " + err.Error(), 400)
+				http.Error(w, "Could not derive PublicKey from PrivateKey: "+err.Error(), 400)
 				return
 			}
 		}
@@ -1125,7 +1120,7 @@ func checkSiteVPNIndex(idx int) (SiteVPN, error) {
 	}
 
 	//check that the mark chain exists
-	err = exec.Command("nft", "list", "chain", "inet", "mangle", "mark"+strconv.Itoa(idx + SiteMarkOffset)).Run()
+	err = exec.Command("nft", "list", "chain", "inet", "mangle", "mark"+strconv.Itoa(idx+SiteMarkOffset)).Run()
 	if err != nil {
 		return vpn, err
 	}
@@ -1298,23 +1293,6 @@ func applySiteVPNs() {
 	}
 
 }
-
-/*
-
-tbd verdict maps  for site forward
-
-// src ip . dst_ip --> verdict is goto mark1000 to f.ex. go to site inetrace with mark/table 1000
-
-map site_dest {
-	type ipv4_addr . ipv4_addr : verdict;
-	flags interval
-}
-
-//tbd:
-need to update ForwardingRule to apply when DstInterface is set.
-
-
-*/
 
 func handleVariable(w http.ResponseWriter, r *http.Request) {
 	FWmtx.Lock()
