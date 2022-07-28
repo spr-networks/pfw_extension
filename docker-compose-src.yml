@@ -1,0 +1,19 @@
+version: '3.4'
+
+x-logging:
+  &default-logging
+  driver: journald
+
+services:
+  pfw:
+    container_name: superpfw
+    build: .
+    network_mode: host
+    privileged: true
+    logging: *default-logging
+    volumes:
+      - /etc/timezone:/etc/timezone:ro
+      - /etc/localtime:/etc/localtime:ro
+      - ./state/plugins/pfw:/state/plugins/pfw
+      - ./configs/base:/configs/base
+      - ./configs/pfw:/configs/pfw
