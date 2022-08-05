@@ -1,4 +1,5 @@
 version: '3.4'
+
 x-logging:
   &default-logging
   driver: journald
@@ -6,10 +7,6 @@ x-logging:
 x-labels:
   &default-labels
   org.supernetworks.ci: ${CI:-false}
-
-x-logging:
-  &default-logging
-  driver: journald
 
 services:
   pfw:
