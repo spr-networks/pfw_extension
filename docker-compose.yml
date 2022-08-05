@@ -20,6 +20,6 @@ services:
     volumes:
       - /etc/timezone:/etc/timezone:ro
       - /etc/localtime:/etc/localtime:ro
-      - ./state/plugins/pfw:/state/plugins/pfw
-      - ./configs/base:/configs/base
-      - ./configs/pfw:/configs/pfw
+      - ../../../state/plugins/pfw:/state/plugins/pfw
+      - ../../../configs/base:/configs/base
+      - ../../../configs/pfw:/configs/pfw
