@@ -34,6 +34,7 @@ jobs:
         env: 
           CONTAINERS: pfw
         run: |
+          docker image list
           for C in $CONTAINERS; do
             docker tag pfw_extension_${C} ghcr.io/spr-networks/pfw_extension_${C}:latest
             docker push ghcr.io/spr-networks/pfw_extension_${C}:latest
