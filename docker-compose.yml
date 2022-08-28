@@ -23,3 +23,4 @@ services:
       - "${SUPERDIR}./state/plugins/pfw:/state/plugins/pfw"
       - "${SUPERDIR}./configs/base:/configs/base"
       - "${SUPERDIR}./configs/pfw:/configs/pfw"
+      - "${SUPERDIR}./state/public/:/state/public/:ro"

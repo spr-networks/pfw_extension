@@ -37,6 +37,7 @@ import (
 var TEST_PREFIX = os.Getenv("TEST_PREFIX")
 var UNIX_PLUGIN_LISTENER = TEST_PREFIX + "/state/plugins/pfw/socket"
 var FirewallConfigFile = TEST_PREFIX + "/configs/pfw/rules.json"
+var DevicesPublicConfigFile = TEST_PREFIX + "/state/public/devices-public.json"
 
 var FWmtx sync.RWMutex
 
@@ -218,37 +219,6 @@ type PSKEntry struct {
 	Psk  string
 }
 
-func fetchAPIDevices() map[string]DeviceEntry {
-	devs := map[string]DeviceEntry{}
-
-	cli := http.Client{
-		Timeout: time.Second * 2, // Timeout after 2 seconds
-	}
-
-	req, err := http.NewRequest(http.MethodGet, "http://localhost:80/devices", nil)
-	if err != nil {
-		fmt.Println(err)
-		return devs
-	}
-
-	FWmtx.RLock()
-	token := gFirewallConfig.APIToken
-	FWmtx.RUnlock()
-
-	req.Header.Add("Authorization", "Bearer "+token)
-
-	resp, err := cli.Do(req)
-	if err != nil {
-		fmt.Println("request failed", err)
-		return devs
-	}
-
-	defer resp.Body.Close()
-
-	json.NewDecoder(resp.Body).Decode(&devs)
-
-	return devs
-}
 
 func updateDevice(identity string, entry DeviceEntry) {
 	//Ensure PSKEntry is not modified
@@ -288,14 +258,22 @@ func updateDevice(identity string, entry DeviceEntry) {
 
 }
 
-var gDevices = make(map[string]DeviceEntry)
+func APIDevices() (map[string]DeviceEntry, error) {
+	devs := map[string]DeviceEntry{}
 
-func APIDevices() map[string]DeviceEntry {
-	return gDevices
-}
+	data, err := ioutil.ReadFile(DevicesPublicConfigFile)
+	if err == nil {
+		err = json.Unmarshal(data, &devs)
+		if err != nil {
+			fmt.Println(err)
+			return nil, err
+		}
+	} else {
+		fmt.Println(err)
+		return nil, err
+	}
 
-func updateAPIData() {
-	gDevices = fetchAPIDevices()
+	return devs, nil
 }
 
 func clientIPs(client ClientIdentifier) []string {
@@ -304,7 +282,11 @@ func clientIPs(client ClientIdentifier) []string {
 		return []string{client.SrcIP}
 	}
 
-	devices := APIDevices()
+	devices, err := APIDevices()
+	if err != nil {
+		fmt.Println("[-] Failed to read devices info")
+		return []string{}
+	}
 
 	if client.Identity != "" {
 		entry, exists := devices[client.Identity]
@@ -1386,20 +1368,6 @@ func ruleTimer() {
 	go runTimer()
 }
 
-func refreshDataTimer() {
-
-	updateAPIData()
-
-	tick := time.NewTicker(1 * time.Minute)
-	defer tick.Stop()
-	for {
-		select {
-		case <-tick.C:
-			updateAPIData()
-		}
-	}
-}
-
 func matchClient(client ClientIdentifier, entry DeviceEntry, identity string) bool {
 	if client.Identity != "" && identity == client.Identity {
 		return true
@@ -1421,7 +1389,11 @@ func matchClient(client ClientIdentifier, entry DeviceEntry, identity string) bo
 
 func removeClient(property string, client ClientIdentifier, values []string) {
 
-	devices := APIDevices()
+	devices, err := APIDevices()
+	if err != nil {
+		fmt.Println("[-] Failed to read devices info")
+		return
+	}
 
 	for identity, entry := range devices {
 		if matchClient(client, entry, identity) {
@@ -1465,7 +1437,11 @@ func removeClient(property string, client ClientIdentifier, values []string) {
 
 func addClient(property string, client ClientIdentifier, values []string) {
 
-	devices := APIDevices()
+	devices, err := APIDevices()
+	if err != nil {
+		fmt.Println("[-] Failed to read devices info")
+		return
+	}
 
 	for identity, entry := range devices {
 		if matchClient(client, entry, identity) {
@@ -1652,7 +1628,6 @@ func modifyGroups(w http.ResponseWriter, r *http.Request) {
 func initPFW() {
 	loadFirewallRules()
 	applySiteVPNs()
-	go refreshDataTimer()
 	ruleTimer()
 }
 
