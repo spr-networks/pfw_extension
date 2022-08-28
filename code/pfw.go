@@ -1,6 +1,6 @@
 /**
  * Copyright (C) Longterm Security, Inc - All Rights Reserved
- * 
+ *
  * This source code is protected under international copyright law.  All rights
  * reserved and protected by the copyright holders.
  * This file is confidential and only available to authorized individuals with the
@@ -1425,35 +1425,37 @@ func removeClient(property string, client ClientIdentifier, values []string) {
 
 	for identity, entry := range devices {
 		if matchClient(client, entry, identity) {
-			newGroups := []string{}
 
 			entry_vals := entry.Groups
 			if property == "tag" {
 				entry_vals = entry.DeviceTags
 			}
 
-			for _, cur_group := range entry_vals {
-				skipGroup := false
-				for _, val_group := range values {
-					if cur_group == val_group {
-						skipGroup = true
+			newValues := []string{}
+
+			//for each of the entry values, remove any that match values
+			for _, cur_val := range entry_vals {
+				keep_value := true
+				for _, new_val := range values {
+					if new_val == cur_val {
+						//found one to remove
+						keep_value = false
 						break
 					}
 				}
-
-				if !skipGroup {
-					newGroups = append(newGroups, cur_group)
+				if keep_value {
+					newValues = append(newValues, cur_val)
 				}
+			}
 
-				if len(newGroups) != len(entry_vals) {
-					//change groups or tags for this entry
-					if property == "group" {
-						entry.Groups = newGroups
-					} else {
-						entry.DeviceTags = newGroups
-					}
-					updateDevice(identity, entry)
+			if len(newValues) != len(entry_vals) {
+				//a change needs to be made, send update
+				if property == "group" {
+					entry.Groups = newValues
+				} else {
+					entry.DeviceTags = newValues
 				}
+				updateDevice(identity, entry)
 			}
 
 		}
@@ -1473,30 +1475,31 @@ func addClient(property string, client ClientIdentifier, values []string) {
 				entry_vals = entry.DeviceTags
 			}
 
-			newGroups := entry_vals
+			newValues := entry_vals
 
-			for _, val_group := range values {
-				skipGroup := false
-				for _, cur_group := range entry_vals {
-					if cur_group == val_group {
-						skipGroup = true
+			//add any unique new values
+			for _, new_val := range values {
+				existing_value := false
+				for _, cur_val := range entry_vals {
+					if new_val == cur_val {
+						//already contains this new value
+						existing_value = true
 						break
 					}
 				}
-
-				if !skipGroup {
-					newGroups = append(newGroups, val_group)
+				if !existing_value {
+					newValues = append(newValues, new_val)
 				}
+			}
 
-				if len(newGroups) != len(entry_vals) {
-					//change groups or tags for this entry
-					if property == "group" {
-						entry.Groups = newGroups
-					} else {
-						entry.DeviceTags = newGroups
-					}
-					updateDevice(identity, entry)
+			if len(newValues) != len(entry_vals) {
+				//a change needs to be made, send update
+				if property == "group" {
+					entry.Groups = newValues
+				} else {
+					entry.DeviceTags = newValues
 				}
+				updateDevice(identity, entry)
 			}
 
 		}
