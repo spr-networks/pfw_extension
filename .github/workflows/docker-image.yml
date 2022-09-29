@@ -1,6 +1,10 @@
 name: Docker Image CI
 
-on: [ push, pull_request ]
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
 
@@ -21,9 +25,6 @@ jobs:
         name: Authenticate to ghcr
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
       -
-        name: Build and push containers
+        name: Build and push multiplatform containers
         run: |
-          cp -R base/template_configs configs
-          ./build_docker_compose.sh \
-            --set "*.platform=linux/amd64,linux/arm64" \
-            `[ "${{ github.event_name }}" = "push" -a "${{ github.ref_name }}" = "main" ] && echo "--push"`
+          ./build_docker_compose.sh --set "*.platform=linux/amd64,linux/arm64" `[ "${{ github.event_name }}" = "push" -a "${{ github.ref_name }}" = "main" ] && echo "--push"`
