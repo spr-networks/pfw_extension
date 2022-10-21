@@ -382,7 +382,7 @@ func isForwardingInstalled(fwd ForwardingRule, clientIP string) bool {
 
 		} else {
 			cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
-				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+				clientIP, ".", fwd.OriginalDstIP, ":", fwd.DstIP, "}")
 		}
 	}
 
@@ -435,7 +435,7 @@ func addForwarding(fwd ForwardingRule, clientIP string) error {
 
 		} else {
 			cmd = exec.Command("nft", "add", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
-				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+				clientIP, ".", fwd.OriginalDstIP, ":", fwd.DstIP, "}")
 		}
 	}
 
@@ -472,7 +472,7 @@ func deleteForwarding(fwd ForwardingRule, clientIP string) error {
 
 		} else {
 			cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
-				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstIP, "}")
+				clientIP, ".", fwd.OriginalDstIP, ":", fwd.DstIP, "}")
 		}
 	}
 
