@@ -15,6 +15,12 @@ jobs:
         name: Checkout
         uses: actions/checkout@v2
       -
+        name: Get version from git
+        run: echo "RELEASE_VERSION=$(git describe --tags --abbrev=0 | grep -Eo '[0-9]+\.[0-9]+.[0-9]+')" >> $GITHUB_ENV
+      -
+        name: Test release tag version
+        run: echo "RELEASE_VERSION == $RELEASE_VERSION"
+      -
         name: Set up QEMU
         uses: docker/setup-qemu-action@v1
       -
