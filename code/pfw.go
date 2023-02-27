@@ -771,6 +771,12 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, "Invalid OriginalDstPort", 400)
 					return
 				}
+
+				//if an OriginalDstPort is set, but a new DstPort is not set, copy
+				// it over.
+				if fwd.DstPort == "" {
+					fwd.DstPort = fwd.OriginalDstPort
+				}
 			}
 
 			ip := net.ParseIP(fwd.DstIP)
