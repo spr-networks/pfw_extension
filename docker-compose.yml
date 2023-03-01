@@ -7,12 +7,19 @@ x-logging:
 x-labels:
   &default-labels
   org.supernetworks.ci: ${CI:-false}
+  org.supernetworks.version: ${RELEASE_VERSION:-latest}${RELEASE_CHANNEL:-}
 
 services:
   pfw:
     container_name: superpfw
-    image: ghcr.io/spr-networks/pfw_extension_pfw
-    build: .
+    image: ghcr.io/spr-networks/pfw_extension_pfw:${RELEASE_VERSION:-latest}${RELEASE_CHANNEL:-}
+    build:
+      context: .
+      labels: *default-labels
+      x-bake:
+        tags:
+        - ghcr.io/spr-networks/pfw_extension_pfw:latest${RELEASE_CHANNEL:-}
+        - ghcr.io/spr-networks/pfw_extension_pfw:${RELEASE_VERSION:-latest}${RELEASE_CHANNEL:-}
     network_mode: host
     privileged: true
     logging: *default-logging
