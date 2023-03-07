@@ -219,7 +219,6 @@ type PSKEntry struct {
 	Psk  string
 }
 
-
 func updateDevice(identity string, entry DeviceEntry) {
 	//Ensure PSKEntry is not modified
 	entry.PSKEntry.Psk = ""
@@ -228,6 +227,8 @@ func updateDevice(identity string, entry DeviceEntry) {
 	cli := http.Client{
 		Timeout: time.Second * 2, // Timeout after 2 seconds
 	}
+
+	defer cli.CloseIdleConnections()
 
 	// marshal User to json
 	json, err := json.Marshal(entry)
@@ -485,7 +486,7 @@ func deleteForwarding(fwd ForwardingRule, clientIP string) error {
 	return err
 }
 
-//https://stackoverflow.com/questions/55093676/checking-if-current-time-is-in-a-given-interval-golang
+// https://stackoverflow.com/questions/55093676/checking-if-current-time-is-in-a-given-interval-golang
 func inTimeSpan(start, end, check time.Time) bool {
 	if start.Before(end) {
 		return !check.Before(start) && !check.After(end)
@@ -496,7 +497,7 @@ func inTimeSpan(start, end, check time.Time) bool {
 	return !start.After(check) || !end.Before(check)
 }
 
-//returns true if the current time is matched
+// returns true if the current time is matched
 // by the time expression
 func activeTime(t TimeExpression) bool {
 
