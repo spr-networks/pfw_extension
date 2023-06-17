@@ -1,5 +1,5 @@
 /**
- * Copyright (C) Longterm Security, Inc - All Rights Reserved
+ * Copyright (C) Supernetworks, Inc - All Rights Reserved
  *
  * This source code is protected under international copyright law.  All rights
  * reserved and protected by the copyright holders.
@@ -38,6 +38,14 @@ var TEST_PREFIX = os.Getenv("TEST_PREFIX")
 var UNIX_PLUGIN_LISTENER = TEST_PREFIX + "/state/plugins/pfw/socket"
 var FirewallConfigFile = TEST_PREFIX + "/configs/pfw/rules.json"
 var DevicesPublicConfigFile = TEST_PREFIX + "/state/public/devices-public.json"
+var gAPIInterfacesPublicPath = TEST_PREFIX + "/state/public/interfaces.json"
+
+type PublicInterfaceConfig struct {
+	Name    string
+	Type    string
+	Subtype string
+	Enabled bool
+}
 
 var FWmtx sync.RWMutex
 
@@ -369,13 +377,20 @@ func deleteBlock(br BlockRule, clientIP string) error {
 	return err
 }
 
-func isForwardingInstalled(fwd ForwardingRule, clientIP string) bool {
+func isForwardingInstalled(fwd ForwardingRule, clientIP string, useCachedOutbound bool) bool {
 	var cmd *exec.Cmd
 
 	if fwd.DstInterface != "" {
+
+		markDst := fwdDstIfaceToIndex(fwd.DstInterface, useCachedOutbound)
+		if markDst == "" {
+			fmt.Println("[-] PFW could not resolve mark for " + fwd.DstInterface)
+			return false
+		}
+
 		//if a destination interface is set, only check clientIP and OriginalDstIP
 		cmd = exec.Command("nft", "get", "element", "inet", "mangle", "site_forward_mangle", "{",
-			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+fwdDstIfaceToIndex(fwd.DstInterface), "}")
+			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+markDst, "}")
 	} else {
 		if fwd.OriginalDstPort != "" {
 			cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
@@ -396,10 +411,24 @@ func isForwardingInstalled(fwd ForwardingRule, clientIP string) bool {
 	}
 }
 
-var SiteMarkOffset = 1000
+const SiteMarkOffset = 1000
+const OutboundRouteTableOffset = 11
 
-func fwdDstIfaceToIndex(iface string) string {
+func fwdDstIfaceToIndex(iface string, useCachedOutbound bool) string {
 	if !strings.HasPrefix(iface, "site") {
+		// check if this matches an outbound interface
+		outbound := []string{}
+		if useCachedOutbound {
+			outbound = outboundIfaceCache
+		} else {
+			outbound = collectOutbound()
+		}
+		for i, dev := range outbound {
+			if dev == iface {
+				return strconv.Itoa(i + OutboundRouteTableOffset)
+			}
+		}
+		// no match
 		return ""
 	}
 
@@ -411,13 +440,18 @@ func fwdDstIfaceToIndex(iface string) string {
 	return strconv.Itoa(val + SiteMarkOffset)
 }
 
-func addForwarding(fwd ForwardingRule, clientIP string) error {
+func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) error {
 	var cmd *exec.Cmd
 
 	if fwd.DstInterface != "" {
+		markDst := fwdDstIfaceToIndex(fwd.DstInterface, useCachedOutbound)
+		if markDst == "" {
+			fmt.Println("[-] PFW could not resolve mark for " + fwd.DstInterface)
+			return fmt.Errorf("[-] Could not resolve mark for " + fwd.DstInterface)
+		}
 		//if a destination interface is set, only check clientIP and OriginalDstIP
 		cmd = exec.Command("nft", "add", "element", "inet", "mangle", "site_forward_mangle", "{",
-			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+fwdDstIfaceToIndex(fwd.DstInterface), "}")
+			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+markDst, "}")
 	} else {
 
 		if fwd.OriginalDstPort != "" {
@@ -449,13 +483,18 @@ func addForwarding(fwd ForwardingRule, clientIP string) error {
 	return err
 }
 
-func deleteForwarding(fwd ForwardingRule, clientIP string) error {
+func deleteForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) error {
 	var cmd *exec.Cmd
 
 	if fwd.DstInterface != "" {
+		markDst := fwdDstIfaceToIndex(fwd.DstInterface, useCachedOutbound)
+		if markDst == "" {
+			fmt.Println("[-] PFW could not resolve mark for " + fwd.DstInterface)
+			return fmt.Errorf("[-] Could not resolve mark for " + fwd.DstInterface)
+		}
 		//if a destination interface is set, only check clientIP and OriginalDstIP
 		cmd = exec.Command("nft", "delete", "element", "inet", "mangle", "site_forward_mangle", "{",
-			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+fwdDstIfaceToIndex(fwd.DstInterface), "}")
+			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+markDst, "}")
 	} else {
 
 		if fwd.OriginalDstPort != "" {
@@ -580,7 +619,12 @@ func checkCondition(condition string) (bool, error) {
 	return value.(bool), nil
 }
 
-func ruleActive(disabled bool, condition string, t TimeExpression) bool {
+func ruleActive(disabled bool, condition string, t TimeExpression, expiry int64) bool {
+
+	if ruleExpired(expiry) {
+		return false
+	}
+
 	if disabled == true {
 		return false
 	}
@@ -610,33 +654,41 @@ func ruleExpired(expiry int64) bool {
 func applyFirewallRulesLocked() {
 
 	//forwarding rules
+
+	refreshForwardOutbound := false
+	newOutbound := collectOutbound()
+	if !reflect.DeepEqual(newOutbound, outboundIfaceCache) {
+		//the list of outbounds changed. All site forwarding needs to be updated
+		refreshForwardOutbound = true
+	}
+
 	for _, fw := range gFirewallConfig.ForwardingRules {
 		for _, clientIP := range clientIPs(fw.Client) {
-			if ruleExpired(fw.Expiration) {
-				continue
+
+			if fw.DstInterface != "" && refreshForwardOutbound {
+				//delete the old forwarding entry using the cache
+				deleteForwarding(fw, clientIP, true)
 			}
 
-			is_installed := isForwardingInstalled(fw, clientIP)
-			if ruleActive(fw.Disabled, fw.Condition, fw.Time) {
+			is_installed := isForwardingInstalled(fw, clientIP, false)
+			if ruleActive(fw.Disabled, fw.Condition, fw.Time, fw.Expiration) {
 				if !is_installed {
-					addForwarding(fw, clientIP)
+					addForwarding(fw, clientIP, false)
 				}
 			} else if is_installed {
-				deleteForwarding(fw, clientIP)
+				deleteForwarding(fw, clientIP, false)
 			}
 
 		}
 	}
 
+	outboundIfaceCache = newOutbound
+
 	//block rules
 	for _, br := range gFirewallConfig.BlockRules {
 		for _, clientIP := range clientIPs(br.Client) {
-			if ruleExpired(br.Expiration) {
-				continue
-			}
-
 			is_installed := isBlockInstalled(br, clientIP)
-			if ruleActive(br.Disabled, br.Condition, br.Time) {
+			if ruleActive(br.Disabled, br.Condition, br.Time, br.Expiration) {
 				if !is_installed {
 					addBlock(br, clientIP)
 				}
@@ -649,10 +701,7 @@ func applyFirewallRulesLocked() {
 
 	//tag assignment rules
 	for _, rule := range gFirewallConfig.TagRules {
-		if ruleExpired(rule.Expiration) {
-			continue
-		}
-		if ruleActive(rule.Disabled, rule.Condition, rule.Time) {
+		if ruleActive(rule.Disabled, rule.Condition, rule.Time, rule.Expiration) {
 			addClient("tag", rule.Client, rule.Tags)
 		} else {
 			removeClient("tag", rule.Client, rule.Tags)
@@ -661,17 +710,14 @@ func applyFirewallRulesLocked() {
 
 	//group assignment rules
 	for _, rule := range gFirewallConfig.GroupRules {
-		if ruleExpired(rule.Expiration) {
-			continue
-		}
-
-		if ruleActive(rule.Disabled, rule.Condition, rule.Time) {
+		if ruleActive(rule.Disabled, rule.Condition, rule.Time, rule.Expiration) {
 			addClient("group", rule.Client, rule.Groups)
 		} else {
 			removeClient("group", rule.Client, rule.Groups)
 		}
 	}
 
+	//future: service tags ?
 }
 
 func initUserFirewallRules() {
@@ -730,14 +776,9 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 
 		//for now only support interfaces named siteX
 		if fwd.DstInterface != "" {
-			if !strings.HasPrefix(fwd.DstInterface, "site") {
-				http.Error(w, "Forwarding Interfaces must start with site[0-9]+ "+err.Error(), 400)
-				return
-			}
-
-			dst_idx := fwdDstIfaceToIndex(fwd.DstInterface)
+			dst_idx := fwdDstIfaceToIndex(fwd.DstInterface, false)
 			if dst_idx == "" {
-				http.Error(w, "Forwarding Interfaces must start with site[0-9]+ "+err.Error(), 400)
+				http.Error(w, "Forwarding Interfaces must start with site[0-9]+ or match an active outbound interface "+err.Error(), 400)
 				return
 			}
 
@@ -810,7 +851,7 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 
 				FWmtx.Unlock()
 				for _, clientIP := range clientIPs(fwd.Client) {
-					deleteForwarding(fwd, clientIP)
+					deleteForwarding(fwd, clientIP, true)
 				}
 				FWmtx.Lock()
 				return
@@ -822,12 +863,11 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 
 	if index_ok {
 		//update existing index with the new fwd
-
 		old_fwd := gFirewallConfig.ForwardingRules[index]
 		gFirewallConfig.ForwardingRules[index] = fwd
 		FWmtx.Unlock()
 		for _, clientIP := range clientIPs(old_fwd.Client) {
-			deleteForwarding(old_fwd, clientIP)
+			deleteForwarding(old_fwd, clientIP, true)
 		}
 		FWmtx.Lock()
 	} else {
@@ -1636,6 +1676,37 @@ func initPFW() {
 	loadFirewallRules()
 	applySiteVPNs()
 	ruleTimer()
+}
+
+//interfaces support
+
+func loadInterfacesPublicConfig() []PublicInterfaceConfig {
+	data, err := os.ReadFile(gAPIInterfacesPublicPath)
+	config := []PublicInterfaceConfig{}
+	if err == nil {
+		_ = json.Unmarshal(data, &config)
+	}
+	return config
+}
+
+var outboundIfaceCache = []string{}
+
+func collectOutbound() []string {
+	interfaces := loadInterfacesPublicConfig()
+
+	outbound := []string{}
+	for _, iface := range interfaces {
+		if iface.Type == "Uplink" && iface.Enabled {
+			outbound = append(outbound, iface.Name)
+			if len(outbound) > 128 {
+				//rules start at 11. 253/254/255 reserved
+				fmt.Println("Too many outbound interfaces, truncating")
+				break
+			}
+		}
+	}
+
+	return outbound
 }
 
 func main() {
