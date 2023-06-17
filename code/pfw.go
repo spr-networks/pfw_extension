@@ -1291,6 +1291,11 @@ func createSiteVPN(i int, vpn SiteVPN) {
 
 		err = exec.Command("nft", "add", "rule", "inet", "mangle", "mark"+markidx,
 			"meta", "mark", "set", markidx).Run()
+		if err == nil {
+			err = exec.Command("nft", "add", "rule", "inet", "mangle", "mark"+markidx,
+				"accept").Run()
+		}
+
 		if err != nil {
 			//delete the chain
 			err = exec.Command("nft", "delete", "chain", "inet", "mangle", "mark"+markidx).Run()
