@@ -437,7 +437,12 @@ func fwdDstIfaceToIndex(iface string, useCachedOutbound bool) string {
 		return ""
 	}
 
-	return strconv.Itoa(val + SiteMarkOffset)
+	offset := SiteMarkOffset
+	if strings.HasPrefix(iface, "cfwd") {
+		offset = BridgeMarkOffset
+	}
+
+	return strconv.Itoa(val + offset)
 }
 
 func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) error {
@@ -449,6 +454,14 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 			fmt.Println("[-] PFW could not resolve mark for " + fwd.DstInterface)
 			return fmt.Errorf("[-] Could not resolve mark for " + fwd.DstInterface)
 		}
+
+		//ensure mark chain exists
+		makeMangleChain(markidx)
+
+		//TBD: check route tables
+		//add default dev as the site idx
+		//makeMarkRouteAndRules(iface, markidx, "0.0.0.0/0")
+
 		//if a destination interface is set, only check clientIP and OriginalDstIP
 		cmd = exec.Command("nft", "add", "element", "inet", "mangle", "site_forward_mangle", "{",
 			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+markDst, "}")
@@ -1240,53 +1253,16 @@ func saveSiteConfig(i int, vpn SiteVPN) error {
 
 }
 
-func createSiteVPN(i int, vpn SiteVPN) {
-	markidx := strconv.Itoa(SiteMarkOffset + i)
-	idx := strconv.Itoa(i)
-
-	err := saveSiteConfig(i, vpn)
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-
-	err = exec.Command("ip", "link", "add", "site"+idx, "type", "wireguard").Run()
-	if err != nil {
-		fmt.Println("ip link add site" + idx + " failed")
-		fmt.Println(err)
-		return
-	}
-
-	err = exec.Command("wg", "setconf", "site"+idx, siteConfigPath(i)).Run()
-	if err != nil {
-		fmt.Println("wg setconf site" + idx + " failed")
-		fmt.Println(err)
-		return
-	}
-
-	err = exec.Command("ip", "addr", "add", vpn.Address, "dev", "site"+idx).Run()
-	if err != nil {
-		fmt.Println("ip addr add " + vpn.Address + " dev site" + idx + " failed")
-		fmt.Println(err)
-		return
-	}
-
-	err = exec.Command("ip", "link", "set", "site"+idx, "up").Run()
-	if err != nil {
-		fmt.Println("ip link set site" + idx + " up failed")
-		fmt.Println(err)
-		return
-	}
-
+func makeMangleChain(markidx string) error {
 	//check nft chain and create it if it does not exist
-	err = exec.Command("nft", "list", "chain", "inet", "mangle", "mark"+markidx).Run()
+	err := exec.Command("nft", "list", "chain", "inet", "mangle", "mark"+markidx).Run()
 	if err != nil {
 		//create it
 		err = exec.Command("nft", "add", "chain", "inet", "mangle", "mark"+markidx).Run()
 		if err != nil {
 			fmt.Println("nft add chain " + markidx + " failed")
 			fmt.Println(err)
-			return
+			return err
 		}
 
 		err = exec.Command("nft", "add", "rule", "inet", "mangle", "mark"+markidx,
@@ -1298,28 +1274,76 @@ func createSiteVPN(i int, vpn SiteVPN) {
 
 		if err != nil {
 			//delete the chain
-			err = exec.Command("nft", "delete", "chain", "inet", "mangle", "mark"+markidx).Run()
+			_ = exec.Command("nft", "delete", "chain", "inet", "mangle", "mark"+markidx).Run()
 			fmt.Println("failed to add rule for mark" + markidx)
 			fmt.Println(err)
-			return
+			return err
 		}
 	}
+	return nil
+}
 
+func makeMarkRouteAndRules(iface string, markidx string, destcidr string) error {
 	//add policy-based routes
-	err = exec.Command("ip", "-4", "route", "add", "0.0.0.0/0", "dev", "site"+idx, "table", markidx).Run()
+	err := exec.Command("ip", "-4", "route", "add", destcidr, "dev", iface, "table", markidx).Run()
 	if err != nil {
-		fmt.Println("failed to add site" + idx + " table")
+		fmt.Println("failed to add " + iface + " table")
+		fmt.Println(err)
+		return err
+	}
+
+	err = exec.Command("ip", "-4", "rule", "add", "from", "all", "fwmark", iface, "table", markidx).Run()
+	if err != nil {
+		fmt.Println("failed to add " + iface + " fwmark rule")
+		fmt.Println(err)
+		return err
+	}
+
+	return nil
+}
+
+func createSiteVPN(i int, vpn SiteVPN) {
+	markidx := strconv.Itoa(SiteMarkOffset + i)
+	idx := strconv.Itoa(i)
+
+	err := saveSiteConfig(i, vpn)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	iface := "site" + idx
+	err = exec.Command("ip", "link", "add", iface, "type", "wireguard").Run()
+	if err != nil {
+		fmt.Println("ip link add site" + idx + " failed")
 		fmt.Println(err)
 		return
 	}
 
-	err = exec.Command("ip", "-4", "rule", "add", "from", "all", "fwmark", markidx, "table", markidx).Run()
+	err = exec.Command("wg", "setconf", iface, siteConfigPath(i)).Run()
 	if err != nil {
-		fmt.Println("failed to add site" + idx + " fwmark rule")
+		fmt.Println("wg setconf site" + idx + " failed")
 		fmt.Println(err)
 		return
 	}
 
+	err = exec.Command("ip", "addr", "add", vpn.Address, "dev", iface).Run()
+	if err != nil {
+		fmt.Println("ip addr add " + vpn.Address + " dev site" + idx + " failed")
+		fmt.Println(err)
+		return
+	}
+
+	err = exec.Command("ip", "link", "set", iface, "up").Run()
+	if err != nil {
+		fmt.Println("ip link set site" + idx + " up failed")
+		fmt.Println(err)
+		return
+	}
+
+	makeMangleChain(markidx)
+
+	//add default dev as the site idx
+	makeMarkRouteAndRules(iface, markidx, "0.0.0.0/0")
 }
 
 func applySiteVPNs() {
@@ -1335,7 +1359,6 @@ func applySiteVPNs() {
 			createSiteVPN(i, siteVPN)
 		}
 	}
-
 }
 
 func handleVariable(w http.ResponseWriter, r *http.Request) {
