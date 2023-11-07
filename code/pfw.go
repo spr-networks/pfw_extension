@@ -388,9 +388,16 @@ func isForwardingInstalled(fwd ForwardingRule, clientIP string, useCachedOutboun
 			return false
 		}
 
-		//if a destination interface is set, only check clientIP and OriginalDstIP
-		cmd = exec.Command("nft", "get", "element", "inet", "mangle", "site_forward_mangle", "{",
-			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+markDst, "}")
+		if fwd.Protocol == "" {
+			//if a destination interface is set, only check clientIP and OriginalDstIP
+			cmd = exec.Command("nft", "get", "element", "inet", "mangle", "site_forward_mangle", "{",
+				clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+markDst, "}")
+		} else {
+			//when a protocol is set -- add the port as well
+			cmd = exec.Command("nft", "get", "element", "inet", "mangle", "site_forward_"+fwd.Protocol+"_port_mangle", "{",
+				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", "jump mark"+markDst, "}")
+		}
+
 	} else {
 		if fwd.OriginalDstPort != "" {
 			cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
@@ -453,13 +460,22 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 		//ensure mark chain exists
 		makeMangleChain(markDst)
 
-		//TBD: check route tables
-		//add default dev as the site idx
-		//makeMarkRouteAndRules(iface, markidx, "0.0.0.0/0")
+		dest_ip := "0.0.0.0/0"
+		if fwd.DstIP != "" {
+			dest_ip = fwd.DstIP
+		}
+		makeMarkRouteAndRules(fwd.DstInterface, markDst, dest_ip)
 
-		//if a destination interface is set, only check clientIP and OriginalDstIP
-		cmd = exec.Command("nft", "add", "element", "inet", "mangle", "site_forward_mangle", "{",
-			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+markDst, "}")
+		if fwd.Protocol == "" {
+			//if a destination interface is set, only check clientIP and OriginalDstIP
+			cmd = exec.Command("nft", "add", "element", "inet", "mangle", "site_forward_mangle", "{",
+				clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+markDst, "}")
+		} else {
+			//when a protocol is set -- add the port as well
+			cmd = exec.Command("nft", "add", "element", "inet", "mangle", "site_forward_"+fwd.Protocol+"_port_mangle", "{",
+				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", "jump mark"+markDst, "}")
+		}
+
 	} else {
 
 		if fwd.OriginalDstPort != "" {
@@ -500,9 +516,17 @@ func deleteForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound boo
 			fmt.Println("[-] PFW could not resolve mark for " + fwd.DstInterface)
 			return fmt.Errorf("[-] Could not resolve mark for " + fwd.DstInterface)
 		}
-		//if a destination interface is set, only check clientIP and OriginalDstIP
-		cmd = exec.Command("nft", "delete", "element", "inet", "mangle", "site_forward_mangle", "{",
-			clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+markDst, "}")
+
+		if fwd.Protocol == "" {
+			//if a destination interface is set, only check clientIP and OriginalDstIP
+			cmd = exec.Command("nft", "delete", "element", "inet", "mangle", "site_forward_mangle", "{",
+				clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+markDst, "}")
+		} else {
+			//when a protocol is set -- add the port as well
+			cmd = exec.Command("nft", "delete", "element", "inet", "mangle", "site_forward_"+fwd.Protocol+"_port_mangle", "{",
+				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", "jump mark"+markDst, "}")
+		}
+
 	} else {
 
 		if fwd.OriginalDstPort != "" {
@@ -790,15 +814,32 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			if fwd.DstPort != "" || fwd.OriginalDstPort != "" {
+			if fwd.DstPort != "" {
 				http.Error(w, "When a DstInterface is set, DstPort is not supported", 400)
 				return
 			}
 
-			if fwd.DstIP != "" {
-				http.Error(w, "When a DstInterface is set, DstIP rewriting is not supported", 400)
+			if fwd.Protocol != "" && fwd.Protocol != "tcp" && fwd.Protocol != "udp" {
+				http.Error(w, "Invalid protocol", 400)
 				return
 			}
+
+			if fwd.Protocol != "" {
+				if fwd.OriginalDstPort == "" {
+					http.Error(w, "Invalid OriginalDstPort", 400)
+					return
+				}
+
+				re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
+
+				if !re.MatchString(fwd.OriginalDstPort) {
+					if err != nil {
+						http.Error(w, "Invalid OriginalDstPort", 400)
+						return
+					}
+				}
+			}
+
 		} else {
 			//ports and new DstIp only needed if there is no DstInterface
 
@@ -1278,20 +1319,53 @@ func makeMangleChain(markidx string) error {
 	return nil
 }
 
-func makeMarkRouteAndRules(iface string, markidx string, destcidr string) error {
+func ruleExists(tableIndex string) (bool, error) {
+
+	// Execute the `ip rule show` command to get the list of rules
+	out, err := exec.Command("ip", "-4", "rule", "show").CombinedOutput()
+	if err != nil {
+		return false, err
+	}
+
+	index, err := strconv.Atoi(tableIndex)
+	if err != nil {
+		return false, err
+	}
+
+	// Search for the specific rule pattern in the output
+	rulePattern := fmt.Sprintf("from all fwmark 0x%x lookup %s", index, tableIndex)
+	if strings.Contains(string(out), rulePattern) {
+		return true, nil
+	}
+
+	return false, nil
+}
+
+func makeMarkRouteAndRules(iface string, markidx string, destip_cidr string) error {
 	//add policy-based routes
-	err := exec.Command("ip", "-4", "route", "add", destcidr, "dev", iface, "table", markidx).Run()
+
+	cmd := exec.Command("ip", "-4", "route", "add", destip_cidr, "dev", iface, "table", markidx)
+
+	if !strings.Contains(destip_cidr, "/") {
+		//do a via instead
+		cmd = exec.Command("ip", "-4", "route", "add", "default", "via", destip_cidr, "dev", iface, "table", markidx)
+	}
+
+	err := cmd.Run()
 	if err != nil {
 		fmt.Println("failed to add " + iface + " table")
 		fmt.Println(err)
 		return err
 	}
 
-	err = exec.Command("ip", "-4", "rule", "add", "from", "all", "fwmark", iface, "table", markidx).Run()
-	if err != nil {
-		fmt.Println("failed to add " + iface + " fwmark rule")
-		fmt.Println(err)
-		return err
+	exists, err := ruleExists(markidx)
+	if err != nil || !exists {
+		err = exec.Command("ip", "-4", "rule", "add", "from", "all", "fwmark", markidx, "table", markidx).Run()
+		if err != nil {
+			fmt.Println("failed to add " + iface + " fwmark rule")
+			fmt.Println(err)
+			return err
+		}
 	}
 
 	return nil
