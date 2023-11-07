@@ -1344,8 +1344,10 @@ func ruleExists(tableIndex string) (bool, error) {
 func makeMarkRouteAndRules(iface string, markidx string, destip_cidr string) error {
 	//add policy-based routes
 
-	cmd := exec.Command("ip", "-4", "route", "add", destip_cidr, "dev", iface, "table", markidx)
+	//flush route table
+	exec.Command("ip", "-4", "route", "flush", "table", markidx).Run()
 
+	cmd := exec.Command("ip", "-4", "route", "add", destip_cidr, "dev", iface, "table", markidx)
 	if !strings.Contains(destip_cidr, "/") {
 		//do a via instead
 		cmd = exec.Command("ip", "-4", "route", "add", "default", "via", destip_cidr, "dev", iface, "table", markidx)
