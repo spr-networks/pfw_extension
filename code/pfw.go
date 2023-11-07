@@ -437,12 +437,7 @@ func fwdDstIfaceToIndex(iface string, useCachedOutbound bool) string {
 		return ""
 	}
 
-	offset := SiteMarkOffset
-	if strings.HasPrefix(iface, "cfwd") {
-		offset = BridgeMarkOffset
-	}
-
-	return strconv.Itoa(val + offset)
+	return strconv.Itoa(val + SiteMarkOffset)
 }
 
 func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) error {
@@ -456,7 +451,7 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 		}
 
 		//ensure mark chain exists
-		makeMangleChain(markidx)
+		makeMangleChain(markDst)
 
 		//TBD: check route tables
 		//add default dev as the site idx
