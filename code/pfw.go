@@ -778,7 +778,7 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 		if fwd.DstInterface != "" {
 			dst_idx := fwdDstIfaceToIndex(fwd.DstInterface, false)
 			if dst_idx == "" {
-				http.Error(w, "Forwarding Interfaces must start with site[0-9]+ or match an active outbound interface "+err.Error(), 400)
+				http.Error(w, "Forwarding Interfaces must start with site[0-9]+ or match an active outbound interface ", 400)
 				return
 			}
 
