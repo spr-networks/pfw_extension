@@ -1319,7 +1319,7 @@ func makeMangleChain(markidx string) error {
 	return nil
 }
 
-func ruleExists(tableIndex string) (bool, error) {
+func fwmarkRuleExists(tableIndex string) (bool, error) {
 
 	// Execute the `ip rule show` command to get the list of rules
 	out, err := exec.Command("ip", "-4", "rule", "show").CombinedOutput()
@@ -1360,7 +1360,7 @@ func makeMarkRouteAndRules(iface string, markidx string, destip_cidr string) err
 		return err
 	}
 
-	exists, err := ruleExists(markidx)
+	exists, err := fwmarkRuleExists(markidx)
 	if err != nil || !exists {
 		err = exec.Command("ip", "-4", "rule", "add", "from", "all", "fwmark", markidx, "table", markidx).Run()
 		if err != nil {
@@ -1410,6 +1410,9 @@ func createSiteVPN(i int, vpn SiteVPN) {
 		fmt.Println(err)
 		return
 	}
+
+	//add the interface to the outbound_sites set
+	exec.Command("nft", "add", "element", "inet", "filter", "outbound_sites", "{", iface, "}").Run()
 
 	makeMangleChain(markidx)
 
