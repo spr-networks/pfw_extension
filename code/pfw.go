@@ -468,10 +468,18 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 
 		if fwd.Protocol == "" {
 			//if a destination interface is set, only check clientIP and OriginalDstIP
+
+			exec.Command("nft", "add", "element", "inet", "filter", "site_forward", "{",
+				clientIP, ".", fwd.OriginalDstIP, ".", fwd.DstInterface, ":", "accept", "}").Run()
+
 			cmd = exec.Command("nft", "add", "element", "inet", "mangle", "site_forward_mangle", "{",
 				clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+markDst, "}")
 		} else {
 			//when a protocol is set -- add the port as well
+
+			exec.Command("nft", "add", "element", "inet", "filter", "site_forward_"+fwd.Protocol+"_port", "{",
+				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ".", fwd.DstInterface, ":", "accept", "}").Run()
+
 			cmd = exec.Command("nft", "add", "element", "inet", "mangle", "site_forward_"+fwd.Protocol+"_port_mangle", "{",
 				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", "jump mark"+markDst, "}")
 		}
@@ -519,9 +527,16 @@ func deleteForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound boo
 
 		if fwd.Protocol == "" {
 			//if a destination interface is set, only check clientIP and OriginalDstIP
+			exec.Command("nft", "delete", "element", "inet", "filter", "site_forward_mangle", "{",
+				clientIP, ".", fwd.OriginalDstIP, ".", fwd.DstInterface, ":", "accept", "}").Run()
+
 			cmd = exec.Command("nft", "delete", "element", "inet", "mangle", "site_forward_mangle", "{",
 				clientIP, ".", fwd.OriginalDstIP, ":", "jump mark"+markDst, "}")
 		} else {
+
+			exec.Command("nft", "delete", "element", "inet", "filter", "site_forward_"+fwd.Protocol+"_port", "{",
+				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ".", fwd.DstInterface, ":", "accept", "}").Run()
+
 			//when a protocol is set -- add the port as well
 			cmd = exec.Command("nft", "delete", "element", "inet", "mangle", "site_forward_"+fwd.Protocol+"_port_mangle", "{",
 				clientIP, ".", fwd.OriginalDstIP, ".", fwd.OriginalDstPort, ":", "jump mark"+markDst, "}")
@@ -1411,9 +1426,6 @@ func createSiteVPN(i int, vpn SiteVPN) {
 		return
 	}
 
-	//add the interface to the outbound_sites set
-	exec.Command("nft", "add", "element", "inet", "filter", "outbound_sites", "{", iface, "}").Run()
-
 	makeMangleChain(markidx)
 
 	//add default dev as the site idx
@@ -1421,16 +1433,23 @@ func createSiteVPN(i int, vpn SiteVPN) {
 }
 
 func applySiteVPNs() {
+	exec.Command("nft", "flush", "set", "inet", "filter", "outbound_sites").Run()
+
 	for i, siteVPN := range gFirewallConfig.SiteVPNs {
 		//check if siteVPN is online and happy. if not, remake it
+		iface := "site" + strconv.Itoa(i)
+		//add the interface to the outbound_sites set
+		exec.Command("nft", "add", "element", "inet", "filter", "outbound_sites", "{", iface, "}").Run()
+
 		currentSite, err := checkSiteVPNIndex(i)
 		if err == nil && currentSite == siteVPN {
 			//configuration matches, all done for this one
 			continue
 		} else {
 			//destroy the interface and re-create it
-			exec.Command("ip", "link", "del", "site"+strconv.Itoa(i)).Run()
+			exec.Command("ip", "link", "del", iface).Run()
 			createSiteVPN(i, siteVPN)
+
 		}
 	}
 }
