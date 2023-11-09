@@ -825,9 +825,9 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if fwd.Protocol != "" {
+
 				if fwd.OriginalDstPort == "" {
-					http.Error(w, "Invalid OriginalDstPort", 400)
-					return
+					fwd.OriginalDstPort = "0-65535"
 				}
 
 				re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
