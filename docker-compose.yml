@@ -30,3 +30,4 @@ services:
       - "${SUPERDIR}./configs/base:/configs/base"
       - "${SUPERDIR}./configs/pfw:/configs/pfw"
       - "${SUPERDIR}./state/public/:/state/public/:ro"
+      - "${SUPERDIR}./state/api/:/state/api/:ro"

@@ -16,6 +16,7 @@ import (
 	"fmt"
 	"io"
 	"io/ioutil"
+	"log"
 	"net"
 	"net/http"
 	"os"
@@ -32,6 +33,10 @@ import (
 	"github.com/PaesslerAG/gval"
 	cronexpr "github.com/adhocore/gronx"
 	"github.com/gorilla/mux"
+)
+
+import (
+	"github.com/spr-networks/sprbus"
 )
 
 var TEST_PREFIX = os.Getenv("TEST_PREFIX")
@@ -1536,6 +1541,19 @@ func ruleTimer() {
 	go runTimer()
 }
 
+func busListener() {
+	go func() {
+		for i := 30; i > 0; i-- {
+			err := sprbus.HandleEvent("dns:serve:", handleDnsEvent)
+			if err != nil {
+				log.Println(err)
+			}
+			time.Sleep(3 * time.Second)
+		}
+		log.Fatal("failed to establish connection to sprbus")
+	}()
+}
+
 func matchClient(client ClientIdentifier, entry DeviceEntry, identity string) bool {
 	if client.Identity != "" && identity == client.Identity {
 		return true
@@ -1797,6 +1815,7 @@ func initPFW() {
 	loadFirewallRules()
 	applySiteVPNs()
 	ruleTimer()
+	busListener()
 }
 
 //interfaces support
