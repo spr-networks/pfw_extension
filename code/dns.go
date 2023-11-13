@@ -70,3 +70,11 @@ func handleDnsEvent(topic string, value string) {
 		break
 	}
 }
+
+func resolve(addr Address) []string {
+	if addr.IP != "" {
+		return []string{addr.IP}
+	}
+
+	return []string{}
+}
