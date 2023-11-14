@@ -149,7 +149,7 @@ func updateRegexpCachesLocked(domain string, ips []string, ttls []int) {
 		if is_regexp {
 			re, err := regexp.Compile("^" + cached_name[1:len(cached_name)-1] + "$")
 			if err == nil {
-				if re.MatchString(domain) {
+				if re.MatchString(domain[:len(domain)-1]) { //slice off trailing dot
 					setTTLAliveIPsLocked(cached_name, ips, ttls)
 				}
 			}
