@@ -392,7 +392,7 @@ func TimeoutTail(addr Address) []string {
 	if addr.Domain == "" {
 		return []string{"}"}
 	}
-	interval := fmt.Sprintf("%ds", gFirewallConfig.DNSRefreshInterval)
+	interval := fmt.Sprintf("%ds", DNSInterval())
 	return []string{"timeout", interval, "}"}
 }
 
