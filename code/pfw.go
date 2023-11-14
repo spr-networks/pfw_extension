@@ -257,9 +257,16 @@ func validateAddress(addr Address, field string) error {
 		}
 	} else if addr.Domain == "" {
 		return fmt.Errorf("Need IP or Domain set for " + field)
+	} else {
+		if addr.Domain[0] == '/' {
+			//make sure it ends with / as well
+			if len(addr.Domain) < 3 || addr.Domain[len(addr.Domain)-1] != '/' {
+				return fmt.Errorf("Invalid regexp for " + field)
+			}
+		}
 	}
 
-	//regexp on domain?
+	//more filtered regexp on domain?
 
 	return nil
 }
