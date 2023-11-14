@@ -371,7 +371,11 @@ func resolve(addr Address) []string {
 			DNSCache[addr.Domain] = []string{}
 			return []string{}
 		}
-		return getTTLAliveIPsLocked(addr.Domain, ips)
+		if len(ips) != 0 {
+			return getTTLAliveIPsLocked(addr.Domain, ips)
+		}
+		// return empty.
+		return ips
 	}
 }
 
