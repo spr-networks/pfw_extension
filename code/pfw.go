@@ -396,14 +396,6 @@ func TimeoutTail(addr Address) []string {
 	return []string{"timeout", interval, "}"}
 }
 
-func TimeoutTail2(addr Address, addr2 Address) []string {
-	if addr.Domain == "" && addr2.Domain == "" {
-		return []string{"}"}
-	}
-	interval := fmt.Sprintf("%ds", gFirewallConfig.DNSRefreshInterval)
-	return []string{"timeout", interval, "}"}
-}
-
 func isBlockInstalled(br BlockRule, clientIP string) bool {
 	for _, dstIP := range resolve(br.Dst) {
 		cmd := exec.Command("nft", "get", "element", "inet", "filter", blockVmapName, "{",
@@ -486,20 +478,18 @@ func isForwardingInstalled(fwd ForwardingRule, clientIP string, useCachedOutboun
 		}
 	} else {
 		for _, origDstIP := range resolve(fwd.OriginalDst) {
-			for _, dstIP := range resolve(fwd.Dst) {
-				if fwd.OriginalDstPort != "" {
-					cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
-						clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", dstIP, "}")
-				} else {
-					cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
-						clientIP, ".", origDstIP, ":", dstIP, "}")
-				}
+			if fwd.OriginalDstPort != "" {
+				cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
+					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", fwd.Dst.IP, "}")
+			} else {
+				cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
+					clientIP, ".", origDstIP, ":", fwd.Dst.IP, "}")
+			}
 
-				err := cmd.Run()
+			err := cmd.Run()
 
-				if err != nil {
-					return false
-				}
+			if err != nil {
+				return false
 			}
 		}
 	}
@@ -611,31 +601,29 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 		}
 	} else {
 		for _, origDstIP := range resolve(fwd.OriginalDst) {
-			for _, dstIP := range resolve(fwd.Dst) {
-				if fwd.OriginalDstPort != "" {
-					cmd = exec.Command("nft", append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_ipmap", "{",
-						clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", dstIP}, TimeoutTail2(fwd.OriginalDst, fwd.Dst)...)...)
-
-					err = cmd.Run()
-					if err != nil {
-						fmt.Println("failed to add element", err)
-						fmt.Println(cmd)
-						return err
-					}
-
-					cmd = exec.Command("nft", append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_portmap", "{",
-						clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", dstIP}, TimeoutTail2(fwd.OriginalDst, fwd.Dst)...)...)
-
-				} else {
-					cmd = exec.Command("nft", append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_anymap", "{",
-						clientIP, ".", origDstIP, ":", dstIP}, TimeoutTail2(fwd.OriginalDst, fwd.Dst)...)...)
-				}
+			if fwd.OriginalDstPort != "" {
+				cmd = exec.Command("nft", append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_ipmap", "{",
+					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", fwd.Dst.IP}, TimeoutTail(fwd.OriginalDst)...)...)
 
 				err = cmd.Run()
 				if err != nil {
 					fmt.Println("failed to add element", err)
 					fmt.Println(cmd)
+					return err
 				}
+
+				cmd = exec.Command("nft", append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_portmap", "{",
+					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", fwd.Dst.IP}, TimeoutTail(fwd.OriginalDst)...)...)
+
+			} else {
+				cmd = exec.Command("nft", append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_anymap", "{",
+					clientIP, ".", origDstIP, ":", fwd.Dst.IP}, TimeoutTail(fwd.OriginalDst)...)...)
+			}
+
+			err = cmd.Run()
+			if err != nil {
+				fmt.Println("failed to add element", err)
+				fmt.Println(cmd)
 			}
 		}
 	}
@@ -675,31 +663,28 @@ func deleteForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound boo
 	} else {
 
 		for _, origDstIP := range resolve(fwd.OriginalDst) {
-			for _, dstIP := range resolve(fwd.Dst) {
-
-				if fwd.OriginalDstPort != "" {
-					cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
-						clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", dstIP, "}")
-
-					err = cmd.Run()
-					if err != nil {
-						fmt.Println("failed to delete element", err)
-						fmt.Println(cmd)
-					}
-
-					cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_portmap", "{",
-						clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstPort, "}")
-
-				} else {
-					cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
-						clientIP, ".", origDstIP, ":", dstIP, "}")
-				}
+			if fwd.OriginalDstPort != "" {
+				cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
+					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", fwd.Dst.IP, "}")
 
 				err = cmd.Run()
 				if err != nil {
 					fmt.Println("failed to delete element", err)
 					fmt.Println(cmd)
 				}
+
+				cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_portmap", "{",
+					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstPort, "}")
+
+			} else {
+				cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
+					clientIP, ".", origDstIP, ":", fwd.Dst.IP, "}")
+			}
+
+			err = cmd.Run()
+			if err != nil {
+				fmt.Println("failed to delete element", err)
+				fmt.Println(cmd)
 			}
 		}
 	}
@@ -1017,6 +1002,11 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 				if fwd.DstPort == "" {
 					fwd.DstPort = fwd.OriginalDstPort
 				}
+			}
+
+			if fwd.Dst.Domain != "" {
+				http.Error(w, "Can not use a Domain as the destination", 400)
+				return
 			}
 
 			err = validateAddress(fwd.Dst, "Dst")
