@@ -135,7 +135,7 @@ func handleDnsEvent(topic string, value string) {
 
 func query(domain string) []string {
 	hosts, err := net.LookupIP(domain)
-	if err == nil {
+	if err != nil {
 		fmt.Println("failed to look up domain "+domain, err)
 		return []string{}
 	}
