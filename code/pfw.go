@@ -396,6 +396,14 @@ func TimeoutTail(addr Address) []string {
 	return []string{"timeout", interval, "}"}
 }
 
+func TimeoutKey(addr Address) []string {
+	if addr.Domain == "" {
+		return []string{":"}
+	}
+	interval := fmt.Sprintf("%ds", DNSInterval())
+	return []string{"timeout", interval, ":"}
+}
+
 func isBlockInstalled(br BlockRule, clientIP string) bool {
 	for _, dstIP := range resolve(br.Dst) {
 		cmd := exec.Command("nft", "get", "element", "inet", "filter", blockVmapName, "{",
@@ -576,20 +584,24 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 			if fwd.Protocol == "" {
 				//if a destination interface is set, only check clientIP and OriginalDstIP
 
-				exec.Command("nft", append([]string{"add", "element", "inet", "filter", "site_forward", "{",
-					clientIP, ".", origDstIP, ".", fwd.DstInterface, ":", "accept"}, TimeoutTail(fwd.OriginalDst)...)...).Run()
+				exec.Command("nft", append(append(append([]string{"add", "element", "inet", "filter", "site_forward", "{"},
+					clientIP, ".", origDstIP, ".", fwd.DstInterface),
+					TimeoutKey(fwd.OriginalDst)...),
+					"accept", "}")...).Run()
 
-				cmd = exec.Command("nft", append([]string{"add", "element", "inet", "mangle", "site_forward_mangle", "{",
-					clientIP, ".", origDstIP, ":", "jump mark" + markDst}, TimeoutTail(fwd.OriginalDst)...)...)
+				cmd = exec.Command("nft", append(append([]string{"add", "element", "inet", "mangle", "site_forward_mangle", "{"},
+					clientIP, ".", origDstIP),
+					append(TimeoutKey(fwd.OriginalDst), "jump mark "+markDst, "}")...)...)
 
 			} else {
 				//when a protocol is set -- add the port as well
-				exec.Command("nft", append([]string{"add", "element", "inet", "filter", "site_forward_" + fwd.Protocol + "_port", "{",
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ".", fwd.DstInterface, ":", "accept"}, TimeoutTail(fwd.OriginalDst)...)...).Run()
+				exec.Command("nft", append(append([]string{"add", "element", "inet", "filter", "site_forward_" + fwd.Protocol + "_port", "{"},
+					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ".", fwd.DstInterface),
+					append(TimeoutKey(fwd.OriginalDst), "accept", "}")...)...).Run()
 
-				cmd = exec.Command("nft", append([]string{"add", "element", "inet", "mangle", "site_forward_" + fwd.Protocol + "_port_mangle", "{",
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", "jump mark" + markDst}, TimeoutTail(fwd.OriginalDst)...)...)
-
+				cmd = exec.Command("nft", append(append([]string{"add", "element", "inet", "mangle", "site_forward_" + fwd.Protocol + "_port_mangle", "{"},
+					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort),
+					append(TimeoutKey(fwd.OriginalDst), "jump mark"+markDst, "}")...)...)
 			}
 
 			err = cmd.Run()
@@ -602,8 +614,9 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 	} else {
 		for _, origDstIP := range resolve(fwd.OriginalDst) {
 			if fwd.OriginalDstPort != "" {
-				cmd = exec.Command("nft", append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_ipmap", "{",
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", fwd.Dst.IP}, TimeoutTail(fwd.OriginalDst)...)...)
+				cmd = exec.Command("nft", append(append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_ipmap", "{"},
+					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort),
+					append(TimeoutKey(fwd.OriginalDst), fwd.Dst.IP, "}")...)...)
 
 				err = cmd.Run()
 				if err != nil {
@@ -612,12 +625,14 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 					return err
 				}
 
-				cmd = exec.Command("nft", append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_portmap", "{",
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", fwd.Dst.IP}, TimeoutTail(fwd.OriginalDst)...)...)
+				cmd = exec.Command("nft", append(append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_portmap", "{"},
+					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort),
+					append(TimeoutKey(fwd.OriginalDst), fwd.Dst.IP, "}")...)...)
 
 			} else {
-				cmd = exec.Command("nft", append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_anymap", "{",
-					clientIP, ".", origDstIP, ":", fwd.Dst.IP}, TimeoutTail(fwd.OriginalDst)...)...)
+				cmd = exec.Command("nft", append(append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_anymap", "{"},
+					clientIP, ".", origDstIP),
+					append(TimeoutKey(fwd.OriginalDst), fwd.Dst.IP, "}")...)...)
 			}
 
 			err = cmd.Run()
