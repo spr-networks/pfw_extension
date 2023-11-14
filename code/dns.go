@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"regexp"
 	"sort"
 	"sync"
 	"time"
@@ -44,20 +45,11 @@ type QueryRecord struct {
 
 var DNSCache = map[string][]string{}
 var DNSCacheTime = map[string]time.Time{}
+var DNSTTLCache = map[string][]time.Time{}
 
 // var domainUpdateQueue = []string{}
 var DNSCachemtx sync.RWMutex
 
-/*
-func markDNSRebuild(domain string) {
-	DNSCachemtx.Lock()
-	defer DNSCachemtx.Unlock()
-
-	domainUpdateQueue = append(domainUpdateQueue, domain)
-}
-*/
-
-// subscribe to sprbus and store in db
 func handleDnsEvent(topic string, value string) {
 	var jsonData DNSRecord
 	if err := json.Unmarshal([]byte(value), &jsonData); err != nil {
@@ -67,6 +59,7 @@ func handleDnsEvent(topic string, value string) {
 
 	domain := ""
 	ips := []string{}
+	ttls := []int{}
 
 	for _, q := range jsonData.Q {
 		if q.Name == "" {
@@ -86,6 +79,7 @@ func handleDnsEvent(topic string, value string) {
 				if ip != nil {
 					if ip.To4() != nil {
 						ips = append(ips, ip.To4().String())
+						ttls = append(ttls, a.Hdr.Ttl)
 					}
 				}
 			}
@@ -95,14 +89,27 @@ func handleDnsEvent(topic string, value string) {
 		break
 	}
 
+	if len(ips) != 0 {
+		updateDnsCache(domain, ips, ttls)
+	}
+}
+
+func updateDnsCache(domain string, ips []string, ttls []int) {
 	DNSCachemtx.Lock()
 	defer DNSCachemtx.Unlock()
 
+	//always percolate domain , ips, and ttls to the regexp check
+	updateRegexpCachesLocked(domain, ips, ttls)
+
 	cur_domains, exists := DNSCache[domain]
 	if !exists {
-		//we were not actually tracking this domain already, abort.
+		//domain that came in was not cached directly,
+		// done
 		return
 	}
+
+	//this is a domain tracked directly,
+	// update the ip set and expiration.
 
 	match := true
 	if len(cur_domains) == len(ips) {
@@ -124,27 +131,148 @@ func handleDnsEvent(topic string, value string) {
 		return
 	}
 
+	//For now we will just replace.
+	//In the future we may want to timeout each IP instead.
+	//DNS rules will be inherently lossy regardless though
+
 	//update the cache if it differs
 	DNSCache[domain] = ips
 	//set expiration to current time + refresh interval
 	DNSCacheTime[domain] = time.Now().Add(time.Duration(DNSInterval()) * time.Second)
+}
 
-	//signal to firewall to rebuild?
-	//markDNSRebuild(domain)
+func updateRegexpCachesLocked(domain string, ips []string, ttls []int) {
+	//the domain that came in will be checked against our known
+	//regexp
+	for cached_name, _ := range DNSCache {
+		is_regexp := cached_name[0] == '/'
+		if is_regexp {
+			re, err := regexp.Compile(cached_name)
+			if err == nil {
+				if re.MatchString(domain) {
+					setTTLAliveIPsLocked(cached_name, ips, ttls)
+				}
+			}
+		}
+	}
+}
+
+func setTTLAliveIPsLocked(regexp_domain string, ips []string, ttls []int) {
+	//NOTE: we do not expire. the get will expire for us.
+
+	saved_ips := []string{}
+	saved_ttls := []time.Time{}
+	add_ip := []bool{}
+
+	cached_ips, exists := DNSCache[regexp_domain]
+	cached_ttls, exists2 := DNSTTLCache[regexp_domain]
+
+	cur_time := time.Now()
+	if exists && exists2 && len(cached_ips) == len(cached_ttls) {
+		for j, new_ip := range ips {
+			should_add := true
+			for i, cur_ip := range cached_ips {
+				if cur_ip == new_ip {
+					// bump up the TTL time for this IP
+					cached_ttls[i] = cur_time.Add(time.Duration(ttls[j]) * time.Second)
+					should_add = false
+					break
+				}
+			}
+
+			add_ip = append(add_ip, should_add)
+		}
+
+		//update cached ttls
+		DNSTTLCache[regexp_domain] = cached_ttls
+	}
+
+	for j, new_ip := range ips {
+		// no cached ips or was flagged as new
+		should_add := len(add_ip) == 0 || add_ip[j]
+		if should_add {
+			saved_ips = append(saved_ips, new_ip)
+			saved_ttls = append(saved_ttls, cur_time.Add(time.Duration(ttls[j])*time.Second))
+		}
+	}
+
+	cached_ips = append(cached_ips, saved_ips...)
+	cached_ttls = append(cached_ttls, saved_ttls...)
+	if len(cached_ips) != len(cached_ttls) {
+		fmt.Println("set TTLs failed, mismatched lengths", len(cached_ips), len(cached_ttls))
+		return
+	}
+
+	DNSCache[regexp_domain] = cached_ips
+	DNSTTLCache[regexp_domain] = cached_ttls
+}
+
+func getTTLAliveIPsLocked(regexp_domain string, cached_ips []string) []string {
+	ips := []string{}
+	to_evict := []int{}
+	cached_ttls, exists := DNSTTLCache[regexp_domain]
+
+	if !exists {
+		//no ttl cache -- abort
+		fmt.Println("Unexpected TTL cache missing for regexp domain", len(cached_ips))
+		return ips
+	}
+
+	if len(cached_ttls) != len(cached_ips) {
+		//abort
+		fmt.Println("Unexpected TTL cache and IP cache length mismatches", len(cached_ttls), len(cached_ips))
+		return ips
+	}
+
+	cur_time := time.Now()
+
+	for i := range cached_ttls {
+		if cached_ttls[i].After(cur_time) {
+			//not yet expired, toss it in
+			ips = append(ips, cached_ips[i])
+		} else {
+			to_evict = append(to_evict, i)
+		}
+	}
+
+	//purge expired entries
+	if len(to_evict) != 0 {
+		new_ips := []string{}
+		new_ttls := []time.Time{}
+		for i := range cached_ips {
+			skip_it := false
+			for _, evict := range to_evict {
+				if i == evict {
+					skip_it = true
+					break
+				}
+			}
+
+			if !skip_it {
+				new_ips = append(new_ips, cached_ips[i])
+				new_ttls = append(new_ttls, cached_ttls[i])
+			}
+		}
+
+		DNSCache[regexp_domain] = new_ips
+		DNSTTLCache[regexp_domain] = new_ttls
+	}
+
+	return ips
 }
 
 func query(domain string) []string {
+	ips := []string{}
+
 	hosts, err := net.LookupIP(domain)
 	if err != nil {
 		fmt.Println("failed to look up domain "+domain, err)
-		return []string{}
-	}
-
-	ips := []string{}
-	for _, ip := range hosts {
-		ipv4 := ip.To4()
-		if ipv4 != nil {
-			ips = append(ips, ipv4.String())
+	} else {
+		for _, ip := range hosts {
+			ipv4 := ip.To4()
+			if ipv4 != nil {
+				ips = append(ips, ipv4.String())
+			}
 		}
 	}
 
@@ -156,6 +284,10 @@ func query(domain string) []string {
 	DNSCacheTime[domain] = time.Now().Add(time.Duration(DNSInterval()) * time.Second)
 
 	return ips
+}
+
+func isRegexpDomain(addr Address) bool {
+	return addr.Domain != "" && addr.Domain[0] == '/'
 }
 
 /*
@@ -175,32 +307,32 @@ func resolve(addr Address) []string {
 	if addr.IP != "" {
 		return []string{addr.IP}
 	}
-	//domains := []string{}
+
+	if addr.Domain == "" {
+		return []string{}
+	}
+
 	DNSCachemtx.Lock()
 	ips, exists := DNSCache[addr.Domain]
 	timeout, exists2 := DNSCacheTime[addr.Domain]
 
-	/*
-		foundInUpdates := false
-
-		if exists && exists2 {
-			for i := 0; i < len(domainUpdateQueue); i++ {
-				if domainUpdateQueue[i] == addr.Domain {
-					// Remove domain from queue
-					domainUpdateQueue = append(domainUpdateQueue[:i], domainUpdateQueue[i+1:]...)
-					foundInUpdates = true
-					break
-				}
-			}
+	if !isRegexpDomain(addr) {
+		DNSCachemtx.Unlock() //dont hold lock for query
+		if !exists || !exists2 || timeout.Before(time.Now()) {
+			return query(addr.Domain)
 		}
-	*/
-	DNSCachemtx.Unlock()
-
-	if !exists || !exists2 || timeout.Before(time.Now()) {
-		return query(addr.Domain)
+		return ips
+	} else {
+		defer DNSCachemtx.Unlock()
+		//regexp pathway requires filtering by TTL
+		if !exists {
+			//important, if it does not exist, we will cache an empty array
+			//so that the regexp is tracked by the event bus handler
+			DNSCache[addr.Domain] = []string{}
+			return []string{}
+		}
+		return getTTLAliveIPsLocked(addr.Domain, ips)
 	}
-
-	return ips
 }
 
 func DNSInterval() int {
