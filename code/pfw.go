@@ -263,6 +263,12 @@ func validateAddress(addr Address, field string) error {
 			if len(addr.Domain) < 3 || addr.Domain[len(addr.Domain)-1] != '/' {
 				return fmt.Errorf("Invalid regexp for " + field)
 			}
+
+			//compile it now
+			_, err := regexp.Compile(addr.Domain[1 : len(addr.Domain)-1])
+			if err != nil {
+				return err
+			}
 		}
 	}
 
