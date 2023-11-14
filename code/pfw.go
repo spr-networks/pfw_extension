@@ -130,6 +130,8 @@ type IfaceMarkMapping struct {
 	rmap map[string]string //idx -> iface, not exported to json, rebuilts
 }
 
+// NOTE: be sure to update isLastDomainLocked
+// if any new Address structs are introduced
 type FirewallConfig struct {
 	ForwardingRules    []ForwardingRule
 	BlockRules         []BlockRule
@@ -438,7 +440,7 @@ func addBlock(br BlockRule, clientIP string) error {
 	return nil
 }
 
-func deleteBlock(br BlockRule, clientIP string) error {
+func deleteBlock(br BlockRule, clientIP string, flushLast bool) error {
 	var err error
 	for _, dstIP := range resolve(br.Dst) {
 
@@ -451,6 +453,10 @@ func deleteBlock(br BlockRule, clientIP string) error {
 			fmt.Println("failed to delete element", err)
 			fmt.Println(cmd)
 		}
+	}
+
+	if flushLast {
+		flushDNSCache(br.Dst)
 	}
 
 	return err
@@ -646,7 +652,7 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 	return err
 }
 
-func deleteForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) error {
+func deleteForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool, flushLast bool) error {
 	var cmd *exec.Cmd
 	var err error
 	if fwd.DstInterface != "" {
@@ -702,6 +708,10 @@ func deleteForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound boo
 				fmt.Println(cmd)
 			}
 		}
+	}
+
+	if flushLast {
+		flushDNSCache(fwd.OriginalDst)
 	}
 
 	return err
@@ -849,7 +859,7 @@ func applyFirewallRulesLocked() {
 
 			if fw.DstInterface != "" && refreshForwardOutbound {
 				//delete the old forwarding entry using the cache
-				deleteForwarding(fw, clientIP, true)
+				deleteForwarding(fw, clientIP, true, false)
 			}
 
 			is_installed := isForwardingInstalled(fw, clientIP, false)
@@ -858,7 +868,7 @@ func applyFirewallRulesLocked() {
 					addForwarding(fw, clientIP, false)
 				}
 			} else if is_installed {
-				deleteForwarding(fw, clientIP, false)
+				deleteForwarding(fw, clientIP, false, false)
 			}
 
 		}
@@ -875,7 +885,7 @@ func applyFirewallRulesLocked() {
 					addBlock(br, clientIP)
 				}
 			} else if is_installed {
-				deleteBlock(br, clientIP)
+				deleteBlock(br, clientIP, false)
 			}
 
 		}
@@ -1051,10 +1061,10 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 			if fwd == a {
 				gFirewallConfig.ForwardingRules = append(gFirewallConfig.ForwardingRules[:i], gFirewallConfig.ForwardingRules[i+1:]...)
 				saveFirewallRulesLocked()
-
+				is_last := isLastDomainLocked(fwd.OriginalDst)
 				FWmtx.Unlock()
 				for _, clientIP := range clientIPs(fwd.Client) {
-					deleteForwarding(fwd, clientIP, true)
+					deleteForwarding(fwd, clientIP, true, is_last)
 				}
 				FWmtx.Lock()
 				return
@@ -1068,9 +1078,10 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 		//update existing index with the new fwd
 		old_fwd := gFirewallConfig.ForwardingRules[index]
 		gFirewallConfig.ForwardingRules[index] = fwd
+		is_last := isLastDomainLocked(old_fwd.OriginalDst)
 		FWmtx.Unlock()
 		for _, clientIP := range clientIPs(old_fwd.Client) {
-			deleteForwarding(old_fwd, clientIP, true)
+			deleteForwarding(old_fwd, clientIP, true, is_last)
 		}
 		FWmtx.Lock()
 	} else {
@@ -1149,11 +1160,11 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 			if br == a {
 				gFirewallConfig.BlockRules = append(gFirewallConfig.BlockRules[:i], gFirewallConfig.BlockRules[i+1:]...)
 				saveFirewallRulesLocked()
-
+				is_last := isLastDomainLocked(br.Dst)
 				FWmtx.Unlock()
 				//delete the block rules for the clients where it applies
 				for _, clientIP := range clientIPs(br.Client) {
-					deleteBlock(br, clientIP)
+					deleteBlock(br, clientIP, is_last)
 				}
 				FWmtx.Lock()
 				return
@@ -1168,10 +1179,10 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 		old_br := gFirewallConfig.BlockRules[index]
 		//update existing index with the new br
 		gFirewallConfig.BlockRules[index] = br
-
+		is_last := isLastDomainLocked(old_br.Dst)
 		FWmtx.Unlock()
 		for _, clientIP := range clientIPs(old_br.Client) {
-			deleteBlock(old_br, clientIP)
+			deleteBlock(old_br, clientIP, is_last)
 		}
 		FWmtx.Lock()
 

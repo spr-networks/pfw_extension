@@ -196,6 +196,8 @@ func setTTLAliveIPsLocked(regexp_domain string, ips []string, ttls []int) {
 		}
 	}
 
+	//TBD: smtg to consider is a size restriction here.
+
 	cached_ips = append(cached_ips, saved_ips...)
 	cached_ttls = append(cached_ttls, saved_ttls...)
 	if len(cached_ips) != len(cached_ttls) {
@@ -261,6 +263,44 @@ func getTTLAliveIPsLocked(regexp_domain string, cached_ips []string) []string {
 	return ips
 }
 
+func flushDNSCache(addr Address) {
+	if addr.Domain == "" {
+		return
+	}
+
+	DNSCachemtx.Lock()
+	delete(DNSCache, addr.Domain)
+	delete(DNSCacheTime, addr.Domain)
+	delete(DNSTTLCache, addr.Domain)
+	DNSCachemtx.Unlock()
+}
+
+func isLastDomainLocked(addr Address) bool {
+	//need some awareness of where Address is used,
+	//this function needs updating when the firewall config struct is changed
+
+	//returns true  if the addr.Domain is no longer defined in the rules,
+	// so the cache can purge it
+
+	if addr.Domain == "" {
+		return false
+	}
+	is_last := true
+
+	for _, rule := range gFirewallConfig.ForwardingRules {
+		if rule.OriginalDst.Domain == addr.Domain || rule.Dst.Domain == addr.Domain {
+			return false
+		}
+	}
+
+	for _, rule := range gFirewallConfig.BlockRules {
+		if rule.Dst.Domain == addr.Domain {
+			return false
+		}
+	}
+
+	return is_last
+}
 func query(domain string) []string {
 	ips := []string{}
 
