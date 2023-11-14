@@ -627,7 +627,7 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 
 				cmd = exec.Command("nft", append(append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_portmap", "{"},
 					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort),
-					append(TimeoutKey(fwd.OriginalDst), fwd.Dst.IP, "}")...)...)
+					append(TimeoutKey(fwd.OriginalDst), fwd.DstPort, "}")...)...)
 
 			} else {
 				cmd = exec.Command("nft", append(append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_anymap", "{"},
