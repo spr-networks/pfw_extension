@@ -265,7 +265,7 @@ func validateAddress(addr Address, field string) error {
 			}
 
 			//compile it now
-			_, err := regexp.Compile(addr.Domain[1 : len(addr.Domain)-1])
+			_, err := regexp.Compile("^" + addr.Domain[1:len(addr.Domain)-1] + "$")
 			if err != nil {
 				return err
 			}

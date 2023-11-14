@@ -147,7 +147,7 @@ func updateRegexpCachesLocked(domain string, ips []string, ttls []int) {
 	for cached_name, _ := range DNSCache {
 		is_regexp := cached_name[0] == '/' && len(cached_name) > 2
 		if is_regexp {
-			re, err := regexp.Compile(cached_name[1 : len(cached_name)-1])
+			re, err := regexp.Compile("^" + cached_name[1:len(cached_name)-1] + "$")
 			if err == nil {
 				if re.MatchString(domain) {
 					setTTLAliveIPsLocked(cached_name, ips, ttls)
