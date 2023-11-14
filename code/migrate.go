@@ -47,31 +47,34 @@ type OldFirewallConfig struct {
 	IfaceMarkMap    IfaceMarkMapping
 }
 
-func makeBackup(suffix string) {
+func makeBackup(suffix string) bool {
 	backupFile := FirewallConfigFile + "." + suffix
 
 	if _, err := os.Stat(backupFile); os.IsNotExist(err) {
 		// Open original file
 		originalFile, err := os.Open(FirewallConfigFile)
 		if err != nil {
-			return
+			return true
 		}
 		defer originalFile.Close()
 
 		// Create backup file
 		newFile, err := os.Create(backupFile)
 		if err != nil {
-			return
+			return true
 		}
 		defer newFile.Close()
 
 		// Copy the contents of the original file to the backup file
 		_, err = io.Copy(newFile, originalFile)
 		if err != nil {
-			return
+			return true
 		}
+		return true
 	}
 
+	// already made a backup and migrated
+	return false
 }
 
 func MigrateBlockRule(oldRule OldBlockRule) BlockRule {
@@ -102,7 +105,10 @@ func MigrateFwdRule(oldRule OldForwardingRule) ForwardingRule {
 }
 
 func migratePfwRulesIPtoAddress() error {
-	makeBackup("migrate-address")
+	if makeBackup("migrate-address") == false {
+		//already made migration
+		return nil
+	}
 
 	var old = OldFirewallConfig{[]OldForwardingRule{}, []OldBlockRule{}, []TagRule{}, []GroupRule{}, map[string]interface{}{}, []SiteVPN{}, "", IfaceMarkMapping{}}
 

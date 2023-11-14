@@ -131,17 +131,27 @@ type IfaceMarkMapping struct {
 }
 
 type FirewallConfig struct {
-	ForwardingRules []ForwardingRule
-	BlockRules      []BlockRule
-	TagRules        []TagRule
-	GroupRules      []GroupRule
-	Variables       map[string]interface{}
-	SiteVPNs        []SiteVPN
-	APIToken        string
-	IfaceMarkMap    IfaceMarkMapping
+	ForwardingRules    []ForwardingRule
+	BlockRules         []BlockRule
+	TagRules           []TagRule
+	GroupRules         []GroupRule
+	Variables          map[string]interface{}
+	SiteVPNs           []SiteVPN
+	APIToken           string
+	IfaceMarkMap       IfaceMarkMapping
+	DNSRefreshInterval int
 }
 
-var gFirewallConfig = FirewallConfig{[]ForwardingRule{}, []BlockRule{}, []TagRule{}, []GroupRule{}, map[string]interface{}{}, []SiteVPN{}, "", IfaceMarkMapping{}}
+var gFirewallConfig = FirewallConfig{[]ForwardingRule{},
+	[]BlockRule{},
+	[]TagRule{},
+	[]GroupRule{},
+	map[string]interface{}{},
+	[]SiteVPN{},
+	"",
+	IfaceMarkMapping{},
+	0,
+}
 
 func logRequest(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -378,6 +388,22 @@ func clientIPs(client ClientIdentifier) []string {
 	return []string{}
 }
 
+func TimeoutTail(addr Address) []string {
+	if addr.Domain == "" {
+		return []string{"}"}
+	}
+	interval := fmt.Sprintf("%ds", gFirewallConfig.DNSRefreshInterval)
+	return []string{"timeout", interval, "}"}
+}
+
+func TimeoutTail2(addr Address, addr2 Address) []string {
+	if addr.Domain == "" && addr2.Domain == "" {
+		return []string{"}"}
+	}
+	interval := fmt.Sprintf("%ds", gFirewallConfig.DNSRefreshInterval)
+	return []string{"timeout", interval, "}"}
+}
+
 func isBlockInstalled(br BlockRule, clientIP string) bool {
 	for _, dstIP := range resolve(br.Dst) {
 		cmd := exec.Command("nft", "get", "element", "inet", "filter", blockVmapName, "{",
@@ -396,8 +422,9 @@ func isBlockInstalled(br BlockRule, clientIP string) bool {
 func addBlock(br BlockRule, clientIP string) error {
 	for _, dstIP := range resolve(br.Dst) {
 
-		cmd := exec.Command("nft", "add", "element", "inet", "filter", blockVmapName, "{",
-			clientIP, ".", dstIP, ".", br.Protocol, ".", br.DstPort, ":", blockVerdict, "}")
+		cmd := exec.Command("nft", append([]string{"add", "element", "inet", "filter",
+			blockVmapName, "{", clientIP, ".", dstIP, ".", br.Protocol, ".", br.DstPort,
+			":", blockVerdict}, TimeoutTail(br.Dst)...)...)
 
 		_, err := cmd.Output()
 
@@ -559,19 +586,20 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 			if fwd.Protocol == "" {
 				//if a destination interface is set, only check clientIP and OriginalDstIP
 
-				exec.Command("nft", "add", "element", "inet", "filter", "site_forward", "{",
-					clientIP, ".", origDstIP, ".", fwd.DstInterface, ":", "accept", "}").Run()
+				exec.Command("nft", append([]string{"add", "element", "inet", "filter", "site_forward", "{",
+					clientIP, ".", origDstIP, ".", fwd.DstInterface, ":", "accept"}, TimeoutTail(fwd.OriginalDst)...)...).Run()
 
-				cmd = exec.Command("nft", "add", "element", "inet", "mangle", "site_forward_mangle", "{",
-					clientIP, ".", origDstIP, ":", "jump mark"+markDst, "}")
+				cmd = exec.Command("nft", append([]string{"add", "element", "inet", "mangle", "site_forward_mangle", "{",
+					clientIP, ".", origDstIP, ":", "jump mark" + markDst}, TimeoutTail(fwd.OriginalDst)...)...)
+
 			} else {
 				//when a protocol is set -- add the port as well
+				exec.Command("nft", append([]string{"add", "element", "inet", "filter", "site_forward_" + fwd.Protocol + "_port", "{",
+					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ".", fwd.DstInterface, ":", "accept"}, TimeoutTail(fwd.OriginalDst)...)...).Run()
 
-				exec.Command("nft", "add", "element", "inet", "filter", "site_forward_"+fwd.Protocol+"_port", "{",
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ".", fwd.DstInterface, ":", "accept", "}").Run()
+				cmd = exec.Command("nft", append([]string{"add", "element", "inet", "mangle", "site_forward_" + fwd.Protocol + "_port_mangle", "{",
+					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", "jump mark" + markDst}, TimeoutTail(fwd.OriginalDst)...)...)
 
-				cmd = exec.Command("nft", "add", "element", "inet", "mangle", "site_forward_"+fwd.Protocol+"_port_mangle", "{",
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", "jump mark"+markDst, "}")
 			}
 
 			err = cmd.Run()
@@ -585,9 +613,8 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 		for _, origDstIP := range resolve(fwd.OriginalDst) {
 			for _, dstIP := range resolve(fwd.Dst) {
 				if fwd.OriginalDstPort != "" {
-
-					cmd = exec.Command("nft", "add", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
-						clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", dstIP, "}")
+					cmd = exec.Command("nft", append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_ipmap", "{",
+						clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", dstIP}, TimeoutTail2(fwd.OriginalDst, fwd.Dst)...)...)
 
 					err = cmd.Run()
 					if err != nil {
@@ -596,12 +623,12 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 						return err
 					}
 
-					cmd = exec.Command("nft", "add", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_portmap", "{",
-						clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", dstIP, "}")
+					cmd = exec.Command("nft", append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_portmap", "{",
+						clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", dstIP}, TimeoutTail2(fwd.OriginalDst, fwd.Dst)...)...)
 
 				} else {
-					cmd = exec.Command("nft", "add", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
-						clientIP, ".", origDstIP, ":", dstIP, "}")
+					cmd = exec.Command("nft", append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_anymap", "{",
+						clientIP, ".", origDstIP, ":", dstIP}, TimeoutTail2(fwd.OriginalDst, fwd.Dst)...)...)
 				}
 
 				err = cmd.Run()
@@ -609,7 +636,6 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 					fmt.Println("failed to add element", err)
 					fmt.Println(cmd)
 				}
-
 			}
 		}
 	}
@@ -1629,7 +1655,6 @@ func testExpression(w http.ResponseWriter, r *http.Request) {
 }
 
 func ruleTimer() {
-
 	runTimer := func() {
 		ticker := time.NewTicker(1 * time.Second)
 		for {
