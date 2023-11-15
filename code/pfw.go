@@ -197,6 +197,12 @@ func loadFirewallRules() error {
 		}
 	}
 
+	if gFirewallConfig.IfaceMarkMap.Map == nil {
+		gFirewallConfig.IfaceMarkMap.Map = make(map[string]string)
+	}
+
+	gFirewallConfig.IfaceMarkMap.rmap = make(map[string]string)
+
 	for entry, value := range gFirewallConfig.IfaceMarkMap.Map {
 		gFirewallConfig.IfaceMarkMap.rmap[value] = entry
 	}
