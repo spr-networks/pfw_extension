@@ -1976,10 +1976,28 @@ func modifyGroups(w http.ResponseWriter, r *http.Request) {
 	saveFirewallRulesLocked()
 }
 
+func flushMaps() {
+	//start with a clean slate for pfw maps
+	for _, entry := range []string{"site_forward", "site_forward_tcp_port", "site_forward_udp_port"} {
+		exec.Command("nft", "flush", "map", "inet", "filter", entry).Run()
+	}
+
+	for _, entry := range []string{"site_forward_mangle", "site_forward_tcp_port_mangle", "site_forward_udp_port_mangle"} {
+		exec.Command("nft", "flush", "map", "inet", "mangle", entry).Run()
+	}
+
+	for _, entry := range []string{"dnat_tcp_ipmap", "dnat_tcp_portmap",
+		"dnat_tcp_anymap", "dnat_udp_ipmap", "dnat_udp_portmap", "dnat_udp_anymap"} {
+		exec.Command("nft", "flush", "map", "inet", "nat", entry).Run()
+	}
+
+}
+
 func initPFW() {
 	loadFirewallRules()
 	applySiteVPNs()
 	ruleTimer()
+	flushMaps()
 	busListener()
 }
 
