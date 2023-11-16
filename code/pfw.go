@@ -616,7 +616,7 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 
 				cmd = exec.Command("nft", append(append([]string{"add", "element", "inet", "mangle", "site_forward_mangle", "{"},
 					clientIP, ".", origDstIP),
-					append(TimeoutKey(fwd.OriginalDst), "jump mark "+markDst, "}")...)...)
+					append(TimeoutKey(fwd.OriginalDst), "jump mark"+markDst, "}")...)...)
 
 			} else {
 				//when a protocol is set -- add the port as well
