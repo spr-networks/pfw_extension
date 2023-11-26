@@ -20,7 +20,7 @@ services:
         tags:
         - ghcr.io/spr-networks/pfw_extension_pfw:latest${RELEASE_CHANNEL:-}
         - ghcr.io/spr-networks/pfw_extension_pfw:${RELEASE_VERSION:-latest}${RELEASE_CHANNEL:-}
-    network_mode: ${VIRTUAL_SPR:+service:base:-host}
+    network_mode: ${NETWORK_MODE:-host}
     privileged: true
     logging: *default-logging
     volumes:
