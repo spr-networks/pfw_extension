@@ -1011,10 +1011,8 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 				re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
 
 				if !re.MatchString(fwd.OriginalDstPort) {
-					if err != nil {
-						http.Error(w, "Invalid OriginalDstPort", 400)
-						return
-					}
+					http.Error(w, "Invalid OriginalDstPort", 400)
+					return
 				}
 			}
 
@@ -1036,16 +1034,14 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if fwd.OriginalDstPort != "" && !re.MatchString(fwd.OriginalDstPort) {
-				if err != nil {
-					http.Error(w, "Invalid OriginalDstPort", 400)
-					return
-				}
+				http.Error(w, "Invalid OriginalDstPort", 400)
+				return
+			}
 
-				//if an OriginalDstPort is set, but a new DstPort is not set, copy
-				// it over.
-				if fwd.DstPort == "" {
-					fwd.DstPort = fwd.OriginalDstPort
-				}
+			//if an OriginalDstPort is set, but a new DstPort is not set, copy
+			// it over.
+			if fwd.DstPort == "" {
+				fwd.DstPort = fwd.OriginalDstPort
 			}
 
 			if fwd.Dst.Domain != "" {
