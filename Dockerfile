@@ -15,7 +15,9 @@ RUN --mount=type=tmpfs,target=/root/go/ (go build -ldflags "-s -w" -o /pfw /code
 
 FROM ghcr.io/spr-networks/container_template:latest
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends wireguard-tools && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends wireguard-tools iw jc && rm -rf /var/lib/apt/lists/*
 COPY scripts /scripts/
 COPY --from=builder /pfw /
+RUN mkdir -p /root/.local/share/jc/jcparsers
+COPY scripts/iw*.py /root/.local/share/jc/jcparsers
 ENTRYPOINT ["/scripts/startup.sh"]

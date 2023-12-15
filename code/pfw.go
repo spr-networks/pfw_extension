@@ -1,5 +1,5 @@
 /**
- * Copyright (C) Supernetworks, Inc - All Rights Reserved
+ * Copyright (C) 2022-2023 Supernetworks, Inc - All Rights Reserved
  *
  * This source code is protected under international copyright law.  All rights
  * reserved and protected by the copyright holders.
@@ -1995,6 +1995,7 @@ func initPFW() {
 	ruleTimer()
 	flushMaps()
 	busListener()
+	runTasks()
 }
 
 //interfaces support
@@ -2046,6 +2047,9 @@ func main() {
 
 	unix_plugin_router.HandleFunc("/sitevpns", modifySiteVPN).Methods("DELETE", "PUT")
 	unix_plugin_router.HandleFunc("/sitevpns/{index:[0-9]+}", modifySiteVPN).Methods("DELETE", "PUT")
+
+	unix_plugin_router.HandleFunc("/tasks/run/{task}", runTaskOnce).Methods("PUT")
+	unix_plugin_router.HandleFunc("/tasks/configure/{task}", configTask).Methods("PUT")
 
 	os.Remove(UNIX_PLUGIN_LISTENER)
 	unixPluginListener, err := net.Listen("unix", UNIX_PLUGIN_LISTENER)
