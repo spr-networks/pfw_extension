@@ -257,7 +257,7 @@ func executeWifiScan(rule WifiScanConfig) error {
 		}
 		ret := map[string]interface{}{}
 		err = json.Unmarshal(stdout, &ret)
-		if err == nil {
+		if err != nil {
 			return err
 		}
 
