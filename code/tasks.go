@@ -140,17 +140,21 @@ func runTaskOnce(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	var err error
 	//NOTE: This executes regardless of conditions, or disabled status
 	switch taskName {
 	case "wifi-scan":
-		executeWifiScan(gTaskConfig.WiFiScan)
+		err = executeWifiScan(gTaskConfig.WiFiScan)
 	case "uplink-check":
-		executeUplinkCheck(gTaskConfig.UplinkCheck)
+		err = executeUplinkCheck(gTaskConfig.UplinkCheck)
 	default:
 		http.Error(w, "invalid task", 400)
 		return
 	}
 
+	if err != nil {
+		http.Error(w, err.Error(), 400)
+	}
 }
 
 func configureWifiScan(w http.ResponseWriter, r *http.Request, config WifiScanConfig) {
