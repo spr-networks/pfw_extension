@@ -229,6 +229,10 @@ func configTask(w http.ResponseWriter, r *http.Request) {
 
 func executeWifiScan(rule WifiScanConfig) error {
 	for _, iface := range rule.Interfaces {
+		err := exec.Command("ip", "link", "set", "dev", iface, "up").Run()
+		if err != nil {
+			return err
+		}
 		cmd := exec.Command("iw", "dev", iface, "scan")
 		data, err := cmd.Output()
 		if err != nil {
