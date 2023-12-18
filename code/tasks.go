@@ -201,14 +201,14 @@ func configTask(w http.ResponseWriter, r *http.Request) {
 	case "wifi-scan":
 		wifiScanConfig := WifiScanConfig{}
 		err = json.NewDecoder(r.Body).Decode(&wifiScanConfig)
-		if err != nil {
+		if err == nil {
 			configureWifiScan(w, r, wifiScanConfig)
 			return
 		}
 	case "uplink-check":
 		uplinkCheck := UplinkCheckConfig{}
 		err = json.NewDecoder(r.Body).Decode(&uplinkCheck)
-		if err != nil {
+		if err == nil {
 			configureUplinkCheck(w, r, uplinkCheck)
 			return
 		}
