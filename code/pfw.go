@@ -688,16 +688,16 @@ func deleteForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound boo
 				exec.Command("nft", "delete", "element", "inet", "filter", "site_forward_mangle", "{",
 					clientIP, ".", origDstIP, ".", fwd.DstInterface, ":", "accept", "}").Run()
 
-				cmd = exec.Command("nft", "delete", "element", "inet", "mangle", "site_forward_mangle", "{",
-					clientIP, ".", origDstIP, ":", "jump mark"+markDst, "}")
+				exec.Command("nft", "delete", "element", "inet", "mangle", "site_forward_mangle", "{",
+					clientIP, ".", origDstIP, ":", "jump mark"+markDst, "}").Run()
 			} else {
 
 				exec.Command("nft", "delete", "element", "inet", "filter", "site_forward_"+fwd.Protocol+"_port", "{",
 					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ".", fwd.DstInterface, ":", "accept", "}").Run()
 
 				//when a protocol is set -- add the port as well
-				cmd = exec.Command("nft", "delete", "element", "inet", "mangle", "site_forward_"+fwd.Protocol+"_port_mangle", "{",
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", "jump mark"+markDst, "}")
+				exec.Command("nft", "delete", "element", "inet", "mangle", "site_forward_"+fwd.Protocol+"_port_mangle", "{",
+					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", "jump mark"+markDst, "}").Run()
 			}
 		}
 	} else {
