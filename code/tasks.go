@@ -255,14 +255,16 @@ func executeWifiScan(rule WifiScanConfig) error {
 		if err != nil {
 			return err
 		}
-		ret := map[string]interface{}{}
+		ret := []map[string]interface{}{}
 		err = json.Unmarshal(stdout, &ret)
 		if err != nil {
 			return err
 		}
 
-		//okay now send to sprbus
-		sprbus.Publish("task:wifi-scan", ret)
+		if len(ret) > 0 {
+			//okay now send to sprbus
+			sprbus.Publish("task:wifi-scan", ret[0])
+		}
 
 	}
 
