@@ -2050,6 +2050,7 @@ func main() {
 
 	unix_plugin_router.HandleFunc("/tasks/run/{task}", runTaskOnce).Methods("PUT")
 	unix_plugin_router.HandleFunc("/tasks/configure/{task}", configTask).Methods("PUT")
+	unix_plugin_router.HandleFunc("/tasks/config", getTaskConfig).Methods("GET")
 
 	os.Remove(UNIX_PLUGIN_LISTENER)
 	unixPluginListener, err := net.Listen("unix", UNIX_PLUGIN_LISTENER)

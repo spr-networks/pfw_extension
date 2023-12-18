@@ -108,6 +108,20 @@ func (config *UplinkCheckConfig) Validate() error {
 	return nil
 }
 
+func loadTaskConfigLocked() error {
+	data, err := ioutil.ReadFile(TaskConfigFile)
+	if err != nil {
+		return err
+	} else {
+		err := json.Unmarshal(data, &gTaskConfig)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
 func saveTaskConfigLocked() {
 	file, _ := json.MarshalIndent(gTaskConfig, "", " ")
 	err := ioutil.WriteFile(TaskConfigFile, file, 0600)
@@ -159,6 +173,16 @@ func configureUplinkCheck(w http.ResponseWriter, r *http.Request, config UplinkC
 
 	gTaskConfig.UplinkCheck = config
 	saveTaskConfigLocked()
+}
+
+func getTaskConfig(w http.ResponseWriter, r *http.Request) {
+	Taskmtx.Lock()
+	defer Taskmtx.Unlock()
+
+	x := gTaskConfig
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(x)
 }
 
 func configTask(w http.ResponseWriter, r *http.Request) {
@@ -300,6 +324,11 @@ func executeTasks() {
 }
 
 func runTasks() {
+
+	Taskmtx.Lock()
+	loadTaskConfigLocked()
+	Taskmtx.Unlock()
+
 	runTimer := func() {
 		ticker := time.NewTicker(30 * time.Second)
 		for {
