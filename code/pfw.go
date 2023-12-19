@@ -1,5 +1,5 @@
 /**
- * Copyright (C) Supernetworks, Inc - All Rights Reserved
+ * Copyright (C) 2022-2023 Supernetworks, Inc - All Rights Reserved
  *
  * This source code is protected under international copyright law.  All rights
  * reserved and protected by the copyright holders.
@@ -1011,10 +1011,8 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 				re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
 
 				if !re.MatchString(fwd.OriginalDstPort) {
-					if err != nil {
-						http.Error(w, "Invalid OriginalDstPort", 400)
-						return
-					}
+					http.Error(w, "Invalid OriginalDstPort", 400)
+					return
 				}
 			}
 
@@ -1036,16 +1034,14 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 			}
 
 			if fwd.OriginalDstPort != "" && !re.MatchString(fwd.OriginalDstPort) {
-				if err != nil {
-					http.Error(w, "Invalid OriginalDstPort", 400)
-					return
-				}
+				http.Error(w, "Invalid OriginalDstPort", 400)
+				return
+			}
 
-				//if an OriginalDstPort is set, but a new DstPort is not set, copy
-				// it over.
-				if fwd.DstPort == "" {
-					fwd.DstPort = fwd.OriginalDstPort
-				}
+			//if an OriginalDstPort is set, but a new DstPort is not set, copy
+			// it over.
+			if fwd.DstPort == "" {
+				fwd.DstPort = fwd.OriginalDstPort
 			}
 
 			if fwd.Dst.Domain != "" {
@@ -1999,6 +1995,7 @@ func initPFW() {
 	ruleTimer()
 	flushMaps()
 	busListener()
+	runTasks()
 }
 
 //interfaces support
@@ -2050,6 +2047,10 @@ func main() {
 
 	unix_plugin_router.HandleFunc("/sitevpns", modifySiteVPN).Methods("DELETE", "PUT")
 	unix_plugin_router.HandleFunc("/sitevpns/{index:[0-9]+}", modifySiteVPN).Methods("DELETE", "PUT")
+
+	unix_plugin_router.HandleFunc("/tasks/run/{task}", runTaskOnce).Methods("PUT")
+	unix_plugin_router.HandleFunc("/tasks/configure/{task}", configTask).Methods("PUT")
+	unix_plugin_router.HandleFunc("/tasks/config", getTaskConfig).Methods("GET")
 
 	os.Remove(UNIX_PLUGIN_LISTENER)
 	unixPluginListener, err := net.Listen("unix", UNIX_PLUGIN_LISTENER)
