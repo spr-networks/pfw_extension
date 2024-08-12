@@ -182,8 +182,8 @@ func saveFirewallRulesLocked() {
 }
 
 func loadFirewallRules() error {
-	FWmtx.RLock()
-	defer FWmtx.RUnlock()
+	FWmtx.Lock()
+	defer FWmtx.Unlock()
 
 	migratePfwRulesIPtoAddress()
 
