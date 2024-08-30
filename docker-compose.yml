@@ -12,7 +12,7 @@ x-labels:
 services:
   pfw:
     container_name: superpfw
-    image: ghcr.io/spr-networks/pfw_extension_pfw:${RELEASE_VERSION:-latest}${RELEASE_CHANNEL:-}
+    image: containers.plus.supernetworks.org/spr-networks/pfw_extension_pfw:${RELEASE_VERSION:-latest}${RELEASE_CHANNEL:-}
     build:
       context: .
       labels: *default-labels
