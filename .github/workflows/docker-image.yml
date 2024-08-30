@@ -32,6 +32,14 @@ jobs:
       -
         name: Set up QEMU
         uses: docker/setup-qemu-action@v3
+
+      # Install the cosign tool
+      # https://github.com/sigstore/cosign-installer
+      - name: Install cosign
+        uses: sigstore/cosign-installer@59acb6260d9c0ba8f4a2f9d9b48431a222b68e20 #v3.5.0
+        with:
+          cosign-release: 'v2.2.4'
+
       -
         name: Set up Docker Buildx
         id: buildx
@@ -48,6 +56,15 @@ jobs:
           ./build_docker_compose.sh \
             --set "*.platform=linux/amd64,linux/arm64" \
             `[[ "${{ github.event_name }}" = "workflow_run" && ("${{ github.ref_name }}" = "main")  || ( ! -z $RELEASE_CHANNEL && ("${{ github.event_name }}" = "push")) ]] && echo "--push"` || exit 1
+
+      # Extract metadata (tags, labels) for Docker
+      # https://github.com/docker/metadata-action
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 # v5.0.0
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+
       - name: Get images from docker-compose.yml
         id: get-images
         uses: mikefarah/yq@master
@@ -58,5 +75,14 @@ jobs:
         id: set-matrix
         run: |
           echo 'name=matrix::${{ steps.get-images.outputs.result }}' >> $GITHUB_OUTPUT
+
+      - name: Sign the published Docker image
+        env:
+          # https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-an-intermediate-environment-variable
+          TAGS: ${{ steps.meta.outputs.tags }}
+          DIGEST: ${{ steps.build-and-push.outputs.digest }}
+        # This step uses the identity token to provision an ephemeral certificate
+        # against the sigstore community Fulcio instance.
+        run: echo "${TAGS}" | xargs -I {} cosign sign --force --yes {}@${DIGEST}
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
