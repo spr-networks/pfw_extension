@@ -2,7 +2,7 @@ name: Docker Image CI
 
 on:
   push:
-    branches: [ dev ]
+    branches: [ cosign-test ]
   workflow_run:
     workflows: ["Bump version"]
     types:
@@ -39,10 +39,8 @@ jobs:
 
       # Install the cosign tool
       # https://github.com/sigstore/cosign-installer
-      - name: Install cosign
-        uses: sigstore/cosign-installer@59acb6260d9c0ba8f4a2f9d9b48431a222b68e20 #v3.5.0
-        with:
-          cosign-release: 'v2.2.4'
+      - name: Install Cosign
+        uses: sigstore/cosign-installer@v3.6.0
 
       -
         name: Set up Docker Buildx
@@ -51,6 +49,13 @@ jobs:
       -
         name: Authenticate to ghcr
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - id: docker_meta
+        uses: docker/metadata-action@v4.4.0
+        with:
+          images: ghcr.io/sigstore/sample-honk
+          tags: type=sha,format=long
+
       -
         name: build options
         run: echo "tags:" "*.platform=linux/amd64,linux/arm64" "tags=pfw_extension_pfw:${RELEASE_VERSION:-latest}"
@@ -60,6 +65,17 @@ jobs:
           ./build_docker_compose.sh \
             --set "*.platform=linux/amd64,linux/arm64" \
             `[[ "${{ github.event_name }}" = "workflow_run" && ("${{ github.ref_name }}" = "main")  || ( ! -z $RELEASE_CHANNEL && ("${{ github.event_name }}" = "push")) ]] && echo "--push"` || exit 1
+
+      - name: Sign the images with GitHub OIDC Token
+        env:
+          DIGEST: ${{ steps.build-and-push.outputs.digest }}
+          TAGS: ${{ steps.docker_meta.outputs.tags }}
+        run: |
+          images=""
+          for tag in ${TAGS}; do
+            images+="${tag}@${DIGEST} "
+          done
+          cosign sign --yes ${images}
 
       # Extract metadata (tags, labels) for Docker
       # https://github.com/docker/metadata-action
