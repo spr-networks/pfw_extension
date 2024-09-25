@@ -50,46 +50,34 @@ jobs:
         name: Authenticate to ghcr
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      - id: docker_meta
-        uses: docker/metadata-action@v4.4.0
-        with:
-          images: ghcr.io/sigstore/sample-honk
-          tags: type=sha,format=long
-
       -
         name: build options
         run: echo "tags:" "*.platform=linux/amd64,linux/arm64" "tags=pfw_extension_pfw:${RELEASE_VERSION:-latest}"
-      -
-        name: Build and push containers
-        run: |
-          ./build_docker_compose.sh \
-            --set "*.platform=linux/amd64,linux/arm64" \
-            `[[ "${{ github.event_name }}" = "workflow_run" && ("${{ github.ref_name }}" = "main")  || ( ! -z $RELEASE_CHANNEL && ("${{ github.event_name }}" = "push")) ]] && echo "--push"` || exit 1
 
-      - name: Sign the images with GitHub OIDC Token
-        env:
-          DIGEST: ${{ steps.build-and-push.outputs.digest }}
-          TAGS: ${{ steps.docker_meta.outputs.tags }}
-        run: |
-          images=""
-          for tag in ${TAGS}; do
-            images+="${tag}@${DIGEST} "
-          done
-          cosign sign --yes ${images}
-
-      # Extract metadata (tags, labels) for Docker
-      # https://github.com/docker/metadata-action
-      - name: Extract Docker metadata
-        id: meta
-        uses: docker/metadata-action@96383f45573cb7f253c731d3b3ab81c87ef81934 # v5.0.0
+      - name: Build and push
+        id: build-and-push
+        uses: docker/build-push-action@v6
         with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          platforms: linux/amd64,linux/arm64
+          provenance: false
+          push: ${{ (github.event_name == 'workflow_run' && github.ref_name == 'main') || (env.RELEASE_CHANNEL != '' && github.event_name == 'push') }}
 
       - name: Get images from docker-compose.yml
         id: get-images
         uses: mikefarah/yq@master
         with:
           cmd: yq -o json -I 0 '[.services|.[]|.image]' docker-compose.yml
+
+      - name: Sign the images with GitHub OIDC Token
+        env:
+          DIGEST: ${{ steps.build-and-push.outputs.digest }}
+          TAGS: ${{ steps.get-images.outputs.result }}
+        run: |
+          images=""
+          for tag in ${TAGS}; do
+            images+="${tag}@${DIGEST} "
+          done
+          cosign sign --yes ${images}
 
       - name: Set Matrix output
         id: set-matrix
