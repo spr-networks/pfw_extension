@@ -157,7 +157,7 @@ var gFirewallConfig = FirewallConfig{[]ForwardingRule{},
 
 func logRequest(handler http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if os.Getenv("DEBUGHTTP") != "" {	
+		if os.Getenv("DEBUGHTTP") != "" {
 			fmt.Printf("%s %s %s\n", r.RemoteAddr, r.Method, r.URL)
 		}
 		handler.ServeHTTP(w, r)
@@ -445,9 +445,8 @@ func isBlockInstalled(br BlockRule, clientIP string) bool {
 func addBlock(br BlockRule, clientIP string) error {
 	for _, dstIP := range resolve(br.Dst) {
 
-		cmd := exec.Command("nft", append([]string{"add", "element", "inet", "filter",
-			blockVmapName, "{", clientIP, ".", dstIP, ".", br.Protocol, ".", br.DstPort,
-			":", blockVerdict}, TimeoutTail(br.Dst)...)...)
+		cmd := exec.Command("nft", append([]string{"add", "element", "inet", "filter", blockVmapName},
+			"{"+clientIP+"."+dstIP+"."+br.Protocol+"."+br.DstPort+" : "+strings.Join(TimeoutKey(br.Dst), " ")+" : "+blockVerdict+"}")...)
 
 		_, err := cmd.Output()
 
