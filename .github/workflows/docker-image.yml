@@ -79,12 +79,12 @@ jobs:
         run: |
           cosign sign --yes ${{ env.IMG1 }} ${{ env.IMG2 }}
 
-      - name: Attest Build Provenance
-        uses: actions/attest-build-provenance@v1
-        with:
-          subject-name: ghcr.io/spr-networks/pfw_extension_pfw:${{ env.RELEASE_VERSION || 'latest' }}
-          subject-digest: ${{ steps.build-and-push.outputs.digest }}
-          push-to-registry: true
+      #- name: Attest Build Provenance
+      #  uses: actions/attest-build-provenance@v1
+      #  with:
+      #    subject-name: ghcr.io/spr-networks/pfw_extension_pfw:${{ env.RELEASE_VERSION || 'latest' }}
+      #    subject-digest: ${{ steps.build-and-push.outputs.digest }}
+      #    push-to-registry: true
 
       - name: Set Matrix output
         id: set-matrix
