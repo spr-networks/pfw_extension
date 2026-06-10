@@ -1,0 +1,19 @@
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    nftables iproute2 ca-certificates wget bash git \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG TARGETARCH
+RUN wget -q https://dl.google.com/go/go1.24.2.linux-${TARGETARCH}.tar.gz \
+    && rm -rf /usr/local/go && tar -C /usr/local -xzf go1.24.2.linux-${TARGETARCH}.tar.gz \
+    && rm go1.24.2.linux-${TARGETARCH}.tar.gz
+ENV PATH="/usr/local/go/bin:$PATH"
+
+RUN mkdir /code
+COPY code/ /code/
+COPY test/nft_rules.sh /scripts/nft_rules.sh
+WORKDIR /code
+
+# validate the production build and pre-compile the tests
+RUN go build -o /pfw_plugin . && go test -vet=off -c -o /dev/null .
