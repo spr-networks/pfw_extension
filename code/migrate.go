@@ -124,6 +124,7 @@ func migratePfwRulesIPtoAddress() error {
 
 	gFirewallConfig = FirewallConfig{TagRules: old.TagRules,
 		GroupRules:   old.GroupRules,
+		Variables:    old.Variables,
 		SiteVPNs:     old.SiteVPNs,
 		APIToken:     old.APIToken,
 		IfaceMarkMap: old.IfaceMarkMap, //technically new but ok

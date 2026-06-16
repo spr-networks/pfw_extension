@@ -77,6 +77,10 @@ func verifyAddress(str string) bool {
 		return false
 	}
 
+	if parts[0] == "ip" && len(parts) != 2 { // "ip" does not take a port
+		return false
+	}
+
 	// Validate IP address
 	ip := net.ParseIP(parts[1])
 	if ip == nil {
@@ -101,7 +105,7 @@ func (config *UplinkCheckConfig) Validate() error {
 
 	for i, addr := range config.Addresses {
 		if !verifyAddress(addr) {
-			return fmt.Errorf("Invalid address at index ", i)
+			return fmt.Errorf("Invalid address at index %d", i)
 		}
 	}
 
@@ -272,6 +276,7 @@ func executeWifiScan(rule WifiScanConfig) error {
 }
 
 var gLastUplinkState = make(map[string]string)
+var gLastUplinkStateMtx sync.Mutex
 
 func executeUplinkCheck(rule UplinkCheckConfig) error {
 
@@ -290,19 +295,24 @@ func executeUplinkCheck(rule UplinkCheckConfig) error {
 				newState = "Down"
 			}
 		} else {
-			return fmt.Errorf("Unknown address type", addr)
+			return fmt.Errorf("Unknown address type %s", addr)
 		}
 
+		gLastUplinkStateMtx.Lock()
 		entry, exists := gLastUplinkState[addr]
 		doUpdate := true
 		if exists && entry == newState {
 			doUpdate = false
 		}
 		if doUpdate {
+			gLastUplinkState[addr] = newState
+		}
+		gLastUplinkStateMtx.Unlock()
+
+		if doUpdate {
 			ret := map[string]string{}
 			ret["State"] = newState
 			ret["Address"] = addr
-			gLastUplinkState[addr] = newState
 			sprbus.Publish("task-uplink-check:changed", ret)
 		}
 

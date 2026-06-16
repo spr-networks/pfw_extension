@@ -167,6 +167,9 @@ func logRequest(handler http.Handler) http.Handler {
 func getPFWConfig(w http.ResponseWriter, r *http.Request) {
 	loadFirewallRules()
 
+	FWmtx.RLock()
+	defer FWmtx.RUnlock()
+
 	x := gFirewallConfig
 
 	x.APIToken = "*masked*"
@@ -189,13 +192,14 @@ func loadFirewallRules() error {
 
 	migratePfwRulesIPtoAddress()
 
+	var ret error
 	data, err := ioutil.ReadFile(FirewallConfigFile)
 	if err != nil {
-		return err
+		ret = err
 	} else {
 		err := json.Unmarshal(data, &gFirewallConfig)
 		if err != nil {
-			return err
+			ret = err
 		}
 	}
 
@@ -209,7 +213,7 @@ func loadFirewallRules() error {
 		gFirewallConfig.IfaceMarkMap.rmap[value] = entry
 	}
 
-	return nil
+	return ret
 }
 
 var blockVerdict = "goto PFWDROPLOG"
@@ -411,30 +415,23 @@ func clientIPs(client ClientIdentifier) []string {
 	return []string{}
 }
 
-func TimeoutTail(addr Address) []string {
-	if addr.Domain == "" {
-		return []string{"}"}
-	}
-	interval := fmt.Sprintf("%ds", DNSInterval())
-	return []string{"timeout", interval, "}"}
-}
+// elementTimeout returns the element expiry for DNS-derived addresses
 
-func TimeoutKey(addr Address) []string {
+func elementTimeout(addr Address) time.Duration {
 	if addr.Domain == "" {
-		return []string{":"}
+		return 0
 	}
-	interval := fmt.Sprintf("%ds", DNSInterval())
-	return []string{"timeout", interval, ":"}
+	return time.Duration(DNSInterval()) * time.Second
 }
 
 func isBlockInstalled(br BlockRule, clientIP string) bool {
+	client := GetNFTClient()
 	for _, dstIP := range resolve(br.Dst) {
-		cmd := exec.Command("nft", "get", "element", "inet", "filter", blockVmapName, "{",
-			clientIP, ".", dstIP, ".", br.Protocol, ".", br.DstPort, ":", blockVerdict, "}")
-
-		err := cmd.Run()
-
-		if err != nil {
+		key, _ := buildIPIPProtocolPortRangeKeys(clientIP, dstIP, br.Protocol, br.DstPort)
+		if key == nil {
+			return false
+		}
+		if client.GetMapElement(TableFamilyInet, "filter", blockVmapName, key) != nil {
 			return false
 		}
 	}
@@ -443,35 +440,32 @@ func isBlockInstalled(br BlockRule, clientIP string) bool {
 }
 
 func addBlock(br BlockRule, clientIP string) error {
+	client := GetNFTClient()
 	for _, dstIP := range resolve(br.Dst) {
+		key, keyEnd := buildIPIPProtocolPortRangeKeys(clientIP, dstIP, br.Protocol, br.DstPort)
 
-		cmd := exec.Command("nft", append([]string{"add", "element", "inet", "filter", blockVmapName},
-			"{"+clientIP+"."+dstIP+"."+br.Protocol+"."+br.DstPort+" : "+strings.Join(TimeoutKey(br.Dst), " ")+" : "+blockVerdict+"}")...)
-
-		_, err := cmd.Output()
-
+		err := client.AddMapElementRangeWithTimeout(TableFamilyInet, "filter", blockVmapName,
+			key, keyEnd, []byte(blockVerdict), elementTimeout(br.Dst))
 		if err != nil {
 			fmt.Println("failed to add element", err)
-			fmt.Println(cmd)
 			return err
 		}
-
 	}
 	return nil
 }
 
 func deleteBlock(br BlockRule, clientIP string, flushLast bool) error {
 	var err error
+	client := GetNFTClient()
 	for _, dstIP := range resolve(br.Dst) {
+		key, keyEnd := buildIPIPProtocolPortRangeKeys(clientIP, dstIP, br.Protocol, br.DstPort)
+		if key == nil {
+			continue
+		}
 
-		cmd := exec.Command("nft", "delete", "element", "inet", "filter", blockVmapName, "{",
-			clientIP, ".", dstIP, ".", br.Protocol, ".", br.DstPort, ":", blockVerdict, "}")
-
-		_, err = cmd.Output()
-
+		err = client.DeleteMapElementRange(TableFamilyInet, "filter", blockVmapName, key, keyEnd)
 		if err != nil {
 			fmt.Println("failed to delete element", err)
-			fmt.Println(cmd)
 		}
 	}
 
@@ -483,7 +477,7 @@ func deleteBlock(br BlockRule, clientIP string, flushLast bool) error {
 }
 
 func isForwardingInstalled(fwd ForwardingRule, clientIP string, useCachedOutbound bool) bool {
-	var cmd *exec.Cmd
+	client := GetNFTClient()
 
 	if fwd.DstInterface != "" {
 
@@ -494,17 +488,16 @@ func isForwardingInstalled(fwd ForwardingRule, clientIP string, useCachedOutboun
 		}
 
 		for _, origDstIP := range resolve(fwd.OriginalDst) {
+			var err error
 			if fwd.Protocol == "" {
 				//if a destination interface is set, only check clientIP and OriginalDstIP
-				cmd = exec.Command("nft", "get", "element", "inet", "mangle", "site_forward_mangle", "{",
-					clientIP, ".", origDstIP, ":", "jump mark"+markDst, "}")
+				key, _ := buildIPIPRangeKeys(clientIP, origDstIP)
+				err = client.GetMapElement(TableFamilyInet, "mangle", "site_forward_mangle", key)
 			} else {
 				//when a protocol is set -- add the port as well
-				cmd = exec.Command("nft", "get", "element", "inet", "mangle", "site_forward_"+fwd.Protocol+"_port_mangle", "{",
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", "jump mark"+markDst, "}")
+				key, _ := buildIPIPPortRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort)
+				err = client.GetMapElement(TableFamilyInet, "mangle", "site_forward_"+fwd.Protocol+"_port_mangle", key)
 			}
-
-			err := cmd.Run()
 
 			if err != nil {
 				return false
@@ -512,15 +505,14 @@ func isForwardingInstalled(fwd ForwardingRule, clientIP string, useCachedOutboun
 		}
 	} else {
 		for _, origDstIP := range resolve(fwd.OriginalDst) {
+			var err error
 			if fwd.OriginalDstPort != "" {
-				cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", fwd.Dst.IP, "}")
+				key, _ := buildIPIPPortRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort)
+				err = client.GetMapElement(TableFamilyInet, "nat", "dnat_"+fwd.Protocol+"_ipmap", key)
 			} else {
-				cmd = exec.Command("nft", "get", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
-					clientIP, ".", origDstIP, ":", fwd.Dst.IP, "}")
+				key, _ := buildIPIPRangeKeys(clientIP, origDstIP)
+				err = client.GetMapElement(TableFamilyInet, "nat", "dnat_"+fwd.Protocol+"_anymap", key)
 			}
-
-			err := cmd.Run()
 
 			if err != nil {
 				return false
@@ -585,7 +577,6 @@ func fwdDstIfaceToIndex(iface string, useCachedOutbound bool) string {
 }
 
 func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) error {
-	var cmd *exec.Cmd
 	var err error
 
 	if fwd.DstInterface != "" {
@@ -605,66 +596,63 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 			makeMarkRouteAndRules(fwd.DstInterface, markDst, "0.0.0.0/0")
 		}
 
+		client := GetNFTClient()
+		timeout := elementTimeout(fwd.OriginalDst)
+
 		for _, origDstIP := range resolve(fwd.OriginalDst) {
 
 			if fwd.Protocol == "" {
 				//if a destination interface is set, only check clientIP and OriginalDstIP
 
-				exec.Command("nft", append(append(append([]string{"add", "element", "inet", "filter", "site_forward", "{"},
-					clientIP, ".", origDstIP, ".", fwd.DstInterface),
-					TimeoutKey(fwd.OriginalDst)...),
-					"accept", "}")...).Run()
+				fkey, fkeyEnd := buildIPIPIfaceRangeKeys(clientIP, origDstIP, fwd.DstInterface)
+				client.AddMapElementRangeWithTimeout(TableFamilyInet, "filter", "site_forward",
+					fkey, fkeyEnd, []byte("accept"), timeout)
 
-				cmd = exec.Command("nft", append(append([]string{"add", "element", "inet", "mangle", "site_forward_mangle", "{"},
-					clientIP, ".", origDstIP),
-					append(TimeoutKey(fwd.OriginalDst), "jump mark"+markDst, "}")...)...)
+				mkey, mkeyEnd := buildIPIPRangeKeys(clientIP, origDstIP)
+				err = client.AddMapElementRangeWithTimeout(TableFamilyInet, "mangle", "site_forward_mangle",
+					mkey, mkeyEnd, []byte("jump mark"+markDst), timeout)
 
 			} else {
 				//when a protocol is set -- add the port as well
-				exec.Command("nft", append(append([]string{"add", "element", "inet", "filter", "site_forward_" + fwd.Protocol + "_port", "{"},
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ".", fwd.DstInterface),
-					append(TimeoutKey(fwd.OriginalDst), "accept", "}")...)...).Run()
+				fkey, fkeyEnd := buildIPIPPortIfaceRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort, fwd.DstInterface)
+				client.AddMapElementRangeWithTimeout(TableFamilyInet, "filter", "site_forward_"+fwd.Protocol+"_port",
+					fkey, fkeyEnd, []byte("accept"), timeout)
 
-				cmd = exec.Command("nft", append(append([]string{"add", "element", "inet", "mangle", "site_forward_" + fwd.Protocol + "_port_mangle", "{"},
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort),
-					append(TimeoutKey(fwd.OriginalDst), "jump mark"+markDst, "}")...)...)
+				mkey, mkeyEnd := buildIPIPPortRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort)
+				err = client.AddMapElementRangeWithTimeout(TableFamilyInet, "mangle", "site_forward_"+fwd.Protocol+"_port_mangle",
+					mkey, mkeyEnd, []byte("jump mark"+markDst), timeout)
 			}
 
-			err = cmd.Run()
 			if err != nil {
 				fmt.Println("failed to add element", err)
-				fmt.Println(cmd)
 			}
 
 		}
 	} else {
+		client := GetNFTClient()
+		timeout := elementTimeout(fwd.OriginalDst)
+
 		for _, origDstIP := range resolve(fwd.OriginalDst) {
 			if fwd.OriginalDstPort != "" {
-				cmd = exec.Command("nft", append(append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_ipmap", "{"},
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort),
-					append(TimeoutKey(fwd.OriginalDst), fwd.Dst.IP, "}")...)...)
-
-				err = cmd.Run()
+				key, keyEnd := buildIPIPPortRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort)
+				err = client.AddMapElementRangeWithTimeout(TableFamilyInet, "nat", "dnat_"+fwd.Protocol+"_ipmap",
+					key, keyEnd, IPToBytes(fwd.Dst.IP), timeout)
 				if err != nil {
 					fmt.Println("failed to add element", err)
-					fmt.Println(cmd)
 					return err
 				}
 
-				cmd = exec.Command("nft", append(append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_portmap", "{"},
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort),
-					append(TimeoutKey(fwd.OriginalDst), fwd.DstPort, "}")...)...)
+				err = client.AddMapElementRangeWithTimeout(TableFamilyInet, "nat", "dnat_"+fwd.Protocol+"_portmap",
+					key, keyEnd, PortToBytes(fwd.DstPort), timeout)
 
 			} else {
-				cmd = exec.Command("nft", append(append([]string{"add", "element", "inet", "nat", "dnat_" + fwd.Protocol + "_anymap", "{"},
-					clientIP, ".", origDstIP),
-					append(TimeoutKey(fwd.OriginalDst), fwd.Dst.IP, "}")...)...)
+				key, keyEnd := buildIPIPRangeKeys(clientIP, origDstIP)
+				err = client.AddMapElementRangeWithTimeout(TableFamilyInet, "nat", "dnat_"+fwd.Protocol+"_anymap",
+					key, keyEnd, IPToBytes(fwd.Dst.IP), timeout)
 			}
 
-			err = cmd.Run()
 			if err != nil {
 				fmt.Println("failed to add element", err)
-				fmt.Println(cmd)
 			}
 		}
 	}
@@ -673,7 +661,6 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 }
 
 func deleteForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool, flushLast bool) error {
-	var cmd *exec.Cmd
 	var err error
 	if fwd.DstInterface != "" {
 		markDst := fwdDstIfaceToIndex(fwd.DstInterface, useCachedOutbound)
@@ -682,50 +669,46 @@ func deleteForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound boo
 			return fmt.Errorf("[-] Could not resolve mark for " + fwd.DstInterface)
 		}
 
+		client := GetNFTClient()
+
 		for _, origDstIP := range resolve(fwd.OriginalDst) {
 
 			if fwd.Protocol == "" {
 				//if a destination interface is set, only check clientIP and OriginalDstIP
-				exec.Command("nft", "delete", "element", "inet", "filter", "site_forward_mangle", "{",
-					clientIP, ".", origDstIP, ".", fwd.DstInterface, ":", "accept", "}").Run()
+				fkey, fkeyEnd := buildIPIPIfaceRangeKeys(clientIP, origDstIP, fwd.DstInterface)
+				client.DeleteMapElementRange(TableFamilyInet, "filter", "site_forward", fkey, fkeyEnd)
 
-				exec.Command("nft", "delete", "element", "inet", "mangle", "site_forward_mangle", "{",
-					clientIP, ".", origDstIP, ":", "jump mark"+markDst, "}").Run()
+				mkey, mkeyEnd := buildIPIPRangeKeys(clientIP, origDstIP)
+				client.DeleteMapElementRange(TableFamilyInet, "mangle", "site_forward_mangle", mkey, mkeyEnd)
 			} else {
 
-				exec.Command("nft", "delete", "element", "inet", "filter", "site_forward_"+fwd.Protocol+"_port", "{",
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ".", fwd.DstInterface, ":", "accept", "}").Run()
+				fkey, fkeyEnd := buildIPIPPortIfaceRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort, fwd.DstInterface)
+				client.DeleteMapElementRange(TableFamilyInet, "filter", "site_forward_"+fwd.Protocol+"_port", fkey, fkeyEnd)
 
-				//when a protocol is set -- add the port as well
-				exec.Command("nft", "delete", "element", "inet", "mangle", "site_forward_"+fwd.Protocol+"_port_mangle", "{",
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", "jump mark"+markDst, "}").Run()
+				mkey, mkeyEnd := buildIPIPPortRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort)
+				client.DeleteMapElementRange(TableFamilyInet, "mangle", "site_forward_"+fwd.Protocol+"_port_mangle", mkey, mkeyEnd)
 			}
 		}
 	} else {
+		client := GetNFTClient()
 
 		for _, origDstIP := range resolve(fwd.OriginalDst) {
 			if fwd.OriginalDstPort != "" {
-				cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_ipmap", "{",
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", fwd.Dst.IP, "}")
-
-				err = cmd.Run()
+				key, keyEnd := buildIPIPPortRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort)
+				err = client.DeleteMapElementRange(TableFamilyInet, "nat", "dnat_"+fwd.Protocol+"_ipmap", key, keyEnd)
 				if err != nil {
 					fmt.Println("failed to delete element", err)
-					fmt.Println(cmd)
 				}
 
-				cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_portmap", "{",
-					clientIP, ".", origDstIP, ".", fwd.OriginalDstPort, ":", fwd.DstPort, "}")
+				err = client.DeleteMapElementRange(TableFamilyInet, "nat", "dnat_"+fwd.Protocol+"_portmap", key, keyEnd)
 
 			} else {
-				cmd = exec.Command("nft", "delete", "element", "inet", "nat", "dnat_"+fwd.Protocol+"_anymap", "{",
-					clientIP, ".", origDstIP, ":", fwd.Dst.IP, "}")
+				key, keyEnd := buildIPIPRangeKeys(clientIP, origDstIP)
+				err = client.DeleteMapElementRange(TableFamilyInet, "nat", "dnat_"+fwd.Protocol+"_anymap", key, keyEnd)
 			}
 
-			err = cmd.Run()
 			if err != nil {
 				fmt.Println("failed to delete element", err)
-				fmt.Println(cmd)
 			}
 		}
 	}
@@ -828,7 +811,13 @@ func checkCondition(condition string) (bool, error) {
 		fmt.Println("invalid rule", err)
 		return false, err
 	}
-	return value.(bool), nil
+
+	result, ok := value.(bool)
+	if !ok {
+		fmt.Println("invalid rule, condition is not a boolean", condition)
+		return false, fmt.Errorf("condition did not evaluate to a boolean")
+	}
+	return result, nil
 }
 
 func ruleActive(disabled bool, condition string, t TimeExpression, expiry int64) bool {
@@ -932,15 +921,6 @@ func applyFirewallRulesLocked() {
 	//future: service tags ?
 }
 
-func initUserFirewallRules() {
-	loadFirewallRules()
-
-	FWmtx.RLock()
-	defer FWmtx.RUnlock()
-
-	applyFirewallRulesLocked()
-}
-
 func CIDRorIP(IP string) error {
 	_, _, err := net.ParseCIDR(IP)
 	if err != nil {
@@ -1028,10 +1008,8 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 			re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
 
 			if fwd.DstPort != "" && !re.MatchString(fwd.DstPort) {
-				if err != nil {
-					http.Error(w, "Invalid DstPort", 400)
-					return
-				}
+				http.Error(w, "Invalid DstPort", 400)
+				return
 			}
 
 			if fwd.OriginalDstPort != "" && !re.MatchString(fwd.OriginalDstPort) {
@@ -1391,7 +1369,7 @@ func checkSiteVPNIndex(idx int) (SiteVPN, error) {
 	}
 
 	//check that the mark chain exists
-	err = exec.Command("nft", "list", "chain", "inet", "mangle", "mark"+strconv.Itoa(idx+SiteMarkOffset)).Run()
+	err = CheckChainExists("inet", "mangle", "mark"+strconv.Itoa(idx+SiteMarkOffset))
 	if err != nil {
 		return vpn, err
 	}
@@ -1474,26 +1452,27 @@ func saveSiteConfig(i int, vpn SiteVPN) error {
 
 func makeMangleChain(markidx string) error {
 	//check nft chain and create it if it does not exist
-	err := exec.Command("nft", "list", "chain", "inet", "mangle", "mark"+markidx).Run()
+	err := CheckChainExists("inet", "mangle", "mark"+markidx)
 	if err != nil {
 		//create it
-		err = exec.Command("nft", "add", "chain", "inet", "mangle", "mark"+markidx).Run()
+		err = AddChain("inet", "mangle", "mark"+markidx)
 		if err != nil {
 			fmt.Println("nft add chain " + markidx + " failed")
 			fmt.Println(err)
 			return err
 		}
 
-		err = exec.Command("nft", "add", "rule", "inet", "mangle", "mark"+markidx,
-			"meta", "mark", "set", markidx).Run()
+		mark, err := strconv.ParseUint(markidx, 10, 32)
 		if err == nil {
-			err = exec.Command("nft", "add", "rule", "inet", "mangle", "mark"+markidx,
-				"accept").Run()
+			err = AddMarkSetRule("inet", "mangle", "mark"+markidx, uint32(mark))
+		}
+		if err == nil {
+			err = AddAcceptRule("inet", "mangle", "mark"+markidx)
 		}
 
 		if err != nil {
 			//delete the chain
-			_ = exec.Command("nft", "delete", "chain", "inet", "mangle", "mark"+markidx).Run()
+			_ = DeleteChain("inet", "mangle", "mark"+markidx)
 			fmt.Println("failed to add rule for mark" + markidx)
 			fmt.Println(err)
 			return err
@@ -1601,13 +1580,13 @@ func createSiteVPN(i int, vpn SiteVPN) {
 }
 
 func applySiteVPNs() {
-	exec.Command("nft", "flush", "set", "inet", "filter", "outbound_sites").Run()
+	FlushSetWithTable("inet", "filter", "outbound_sites")
 
 	for i, siteVPN := range gFirewallConfig.SiteVPNs {
 		//check if siteVPN is online and happy. if not, remake it
 		iface := "site" + strconv.Itoa(i)
 		//add the interface to the outbound_sites set
-		exec.Command("nft", "add", "element", "inet", "filter", "outbound_sites", "{", iface, "}").Run()
+		AddInterfaceToSet("outbound_sites", iface)
 
 		currentSite, err := checkSiteVPNIndex(i)
 		if err == nil && currentSite == siteVPN {
@@ -1693,9 +1672,9 @@ func ruleTimer() {
 			select {
 			case <-ticker.C:
 				//every 1s check the firewall rules
-				FWmtx.RLock()
+				FWmtx.Lock()
 				applyFirewallRulesLocked()
-				FWmtx.RUnlock()
+				FWmtx.Unlock()
 			}
 		}
 	}
@@ -1726,9 +1705,20 @@ func matchClient(client ClientIdentifier, entry DeviceEntry, identity string) bo
 	}
 
 	//check groups
-	for _, group := range entry.Groups {
-		if group == client.Group {
-			return true
+	if client.Group != "" {
+		for _, group := range entry.Groups {
+			if group == client.Group {
+				return true
+			}
+		}
+	}
+
+	//check tags
+	if client.Tag != "" {
+		for _, tag := range entry.DeviceTags {
+			if tag == client.Tag {
+				return true
+			}
 		}
 	}
 
@@ -1976,16 +1966,16 @@ func modifyGroups(w http.ResponseWriter, r *http.Request) {
 func flushMaps() {
 	//start with a clean slate for pfw maps
 	for _, entry := range []string{"site_forward", "site_forward_tcp_port", "site_forward_udp_port"} {
-		exec.Command("nft", "flush", "map", "inet", "filter", entry).Run()
+		FlushMapByName("inet", "filter", entry)
 	}
 
 	for _, entry := range []string{"site_forward_mangle", "site_forward_tcp_port_mangle", "site_forward_udp_port_mangle"} {
-		exec.Command("nft", "flush", "map", "inet", "mangle", entry).Run()
+		FlushMapByName("inet", "mangle", entry)
 	}
 
 	for _, entry := range []string{"dnat_tcp_ipmap", "dnat_tcp_portmap",
 		"dnat_tcp_anymap", "dnat_udp_ipmap", "dnat_udp_portmap", "dnat_udp_anymap"} {
-		exec.Command("nft", "flush", "map", "inet", "nat", entry).Run()
+		FlushMapByName("inet", "nat", entry)
 	}
 
 }
@@ -1993,8 +1983,8 @@ func flushMaps() {
 func initPFW() {
 	loadFirewallRules()
 	applySiteVPNs()
-	ruleTimer()
 	flushMaps()
+	ruleTimer()
 	busListener()
 	runTasks()
 }
