@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/gorilla/mux"
-	"github.com/spr-networks/sprbus"
+	sprbus "github.com/spr-networks/sprbus-json"
 )
 
 type TaskConfig struct {

@@ -36,7 +36,7 @@ import (
 )
 
 import (
-	"github.com/spr-networks/sprbus"
+	sprbus "github.com/spr-networks/sprbus-json"
 )
 
 var TEST_PREFIX = os.Getenv("TEST_PREFIX")
@@ -123,6 +123,7 @@ type SiteVPN struct {
 	PrivateKey    string
 	PresharedKey  string
 	Endpoint      string
+	DNS           string
 }
 
 type IfaceMarkMapping struct {
@@ -296,6 +297,7 @@ type DeviceEntry struct {
 	VLANTag    string
 	RecentIP   string
 	PSKEntry   PSKEntry
+	DNSCustom  string
 	Groups     []string
 	DeviceTags []string
 }
@@ -343,6 +345,36 @@ func updateDevice(identity string, entry DeviceEntry) {
 
 	defer resp.Body.Close()
 
+}
+
+func siteVPNDNS(iface string) string {
+	if !strings.HasPrefix(iface, "site") {
+		return ""
+	}
+	idx, err := strconv.Atoi(iface[len("site"):])
+	if err != nil {
+		return ""
+	}
+	FWmtx.RLock()
+	defer FWmtx.RUnlock()
+	if idx < 0 || idx >= len(gFirewallConfig.SiteVPNs) {
+		return ""
+	}
+	return gFirewallConfig.SiteVPNs[idx].DNS
+}
+
+func setDeviceCustomDNS(clientIP, dns string) {
+	devices, err := APIDevices()
+	if err != nil {
+		return
+	}
+	for identity, dev := range devices {
+		if dev.RecentIP == clientIP {
+			dev.DNSCustom = dns
+			updateDevice(identity, dev)
+			return
+		}
+	}
 }
 
 func APIDevices() (map[string]DeviceEntry, error) {
@@ -657,6 +689,15 @@ func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) 
 		}
 	}
 
+	if fwd.OriginalDst.IP == "0.0.0.0/0" && strings.HasPrefix(fwd.DstInterface, "site") {
+		ip, iface := clientIP, fwd.DstInterface
+		go func() {
+			if dns := siteVPNDNS(iface); dns != "" {
+				setDeviceCustomDNS(ip, dns)
+			}
+		}()
+	}
+
 	return err
 }
 
@@ -715,6 +756,11 @@ func deleteForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound boo
 
 	if flushLast {
 		flushDNSCache(fwd.OriginalDst)
+	}
+
+	if fwd.OriginalDst.IP == "0.0.0.0/0" && strings.HasPrefix(fwd.DstInterface, "site") {
+		ip := clientIP
+		go setDeviceCustomDNS(ip, "0")
 	}
 
 	return err
