@@ -2066,10 +2066,77 @@ func collectOutbound() []string {
 	return outbound
 }
 
+// minimal mirror of the SPR API topology types (topology.go)
+type TopoNode struct {
+	ID       string
+	Kind     string
+	Name     string
+	IP       string `json:",omitempty"`
+	Iface    string `json:",omitempty"`
+	ConnType string `json:",omitempty"`
+	Online   bool
+}
+
+type TopoEdge struct {
+	From  string
+	To    string
+	Layer string
+	Kind  string
+}
+
+type TopoSink struct {
+	ID     string
+	Name   string
+	Iface  string
+	IP     string `json:",omitempty"`
+	Online bool
+}
+
+type Topology struct {
+	Nodes []TopoNode
+	Edges []TopoEdge
+	Sinks []TopoSink
+}
+
+// advertise site VPN interfaces as routeable sinks
+func pluginGetTopology(w http.ResponseWriter, r *http.Request) {
+	FWmtx.RLock()
+	sites := append([]SiteVPN{}, gFirewallConfig.SiteVPNs...)
+	FWmtx.RUnlock()
+
+	if len(sites) == 0 {
+		http.Error(w, "no topology", 404)
+		return
+	}
+
+	topo := Topology{
+		Nodes: []TopoNode{{ID: "root", ConnType: "wired", Online: true}},
+		Edges: []TopoEdge{},
+		Sinks: []TopoSink{},
+	}
+
+	for i, vpn := range sites {
+		iface := "site" + strconv.Itoa(i)
+		online := false
+		if link, err := net.InterfaceByName(iface); err == nil {
+			online = link.Flags&net.FlagUp != 0
+		}
+		name := iface
+		if vpn.Endpoint != "" {
+			name = iface + " (" + vpn.Endpoint + ")"
+		}
+		topo.Sinks = append(topo.Sinks, TopoSink{ID: iface, Name: name, Iface: iface, Online: online})
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(topo)
+}
+
 func main() {
 	unix_plugin_router := mux.NewRouter().StrictSlash(true)
 
 	unix_plugin_router.HandleFunc("/config", getPFWConfig).Methods("GET")
+	unix_plugin_router.HandleFunc("/topology", pluginGetTopology).Methods("GET")
 	unix_plugin_router.HandleFunc("/block", modifyBlockRules).Methods("DELETE", "PUT")
 	unix_plugin_router.HandleFunc("/block/{index:[0-9]+}", modifyBlockRules).Methods("DELETE", "PUT")
 	unix_plugin_router.HandleFunc("/forward", modifyForwardRules).Methods("DELETE", "PUT")
