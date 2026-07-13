@@ -1915,6 +1915,21 @@ func AddAcceptRule(family, tableName, chainName string) error {
 	}, false)
 }
 
+func AddDstSupernetworksAcceptRule(family, tableName, chainName string) error {
+	return addRuleExprs(family, tableName, chainName, []expr.Any{
+		&expr.Meta{Key: expr.MetaKeyNFPROTO, Register: 1},
+		&expr.Cmp{Op: expr.CmpOpEq, Register: 1, Data: []byte{unix.NFPROTO_IPV4}},
+		&expr.Payload{
+			DestRegister: 1,
+			Base:         expr.PayloadBaseNetworkHeader,
+			Offset:       16,
+			Len:          4,
+		},
+		&expr.Lookup{SourceRegister: 1, SetName: "supernetworks"},
+		&expr.Verdict{Kind: expr.VerdictAccept},
+	}, false)
+}
+
 // AddIPToSet adds an IP address to a set
 func AddIPToSet(family, tableName, setName, ip string) error {
 	f, client, err := withFamily(family)

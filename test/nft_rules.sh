@@ -49,6 +49,12 @@ table inet mangle {
     type ipv4_addr . ipv4_addr . inet_service: verdict;
     flags interval, timeout;
   }
+
+  set supernetworks {
+    type ipv4_addr;
+    flags interval;
+    elements = { 192.168.2.0/24 }
+  }
 }
 
 table inet nat {

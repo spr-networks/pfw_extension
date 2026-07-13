@@ -246,6 +246,7 @@ func TestMakeMangleChainEquivalence(t *testing.T) {
 	}
 
 	nftRun(t, "add", "chain", "inet", "mangle", "mark208")
+	nftRun(t, "add", "rule", "inet", "mangle", "mark208", "ip", "daddr", "@supernetworks", "accept")
 	nftRun(t, "add", "rule", "inet", "mangle", "mark208", "meta", "mark", "set", "208")
 	nftRun(t, "add", "rule", "inet", "mangle", "mark208", "accept")
 

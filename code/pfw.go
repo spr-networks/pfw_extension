@@ -1510,6 +1510,9 @@ func makeMangleChain(markidx string) error {
 
 		mark, err := strconv.ParseUint(markidx, 10, 32)
 		if err == nil {
+			err = AddDstSupernetworksAcceptRule("inet", "mangle", "mark"+markidx)
+		}
+		if err == nil {
 			err = AddMarkSetRule("inet", "mangle", "mark"+markidx, uint32(mark))
 		}
 		if err == nil {
