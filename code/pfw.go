@@ -23,6 +23,7 @@ import (
 	"os/exec"
 	"reflect"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -898,6 +899,36 @@ func ruleExpired(expiry int64) bool {
 	return false
 }
 
+func flushBlockMapsLocked() {
+	client := GetNFTClient()
+	client.FlushMap(TableFamilyInet, "filter", blockVmapName)
+}
+
+func clientRuleSig(rule interface{}, client ClientIdentifier) string {
+	ips := clientIPs(client)
+	sort.Strings(ips)
+	key, _ := json.Marshal(rule)
+	return string(key) + "=" + strings.Join(ips, ",")
+}
+
+func flushForwardingMapsLocked() {
+	client := GetNFTClient()
+	client.FlushMap(TableFamilyInet, "filter", "site_forward")
+	client.FlushMap(TableFamilyInet, "mangle", "site_forward_mangle")
+	for _, protocol := range []string{"tcp", "udp"} {
+		client.FlushMap(TableFamilyInet, "filter", "site_forward_"+protocol+"_port")
+		client.FlushMap(TableFamilyInet, "mangle", "site_forward_"+protocol+"_port_mangle")
+		client.FlushMap(TableFamilyInet, "nat", "dnat_"+protocol+"_ipmap")
+		client.FlushMap(TableFamilyInet, "nat", "dnat_"+protocol+"_portmap")
+		client.FlushMap(TableFamilyInet, "nat", "dnat_"+protocol+"_anymap")
+	}
+}
+
+func resyncForwardingLocked() {
+	flushForwardingMapsLocked()
+	applyFirewallRulesLocked()
+}
+
 func applyFirewallRulesLocked() {
 
 	//forwarding rules
@@ -907,6 +938,17 @@ func applyFirewallRulesLocked() {
 	if !reflect.DeepEqual(newOutbound, outboundIfaceCache) {
 		//the list of outbounds changed. All site forwarding needs to be updated
 		refreshForwardOutbound = true
+	}
+
+	fwdParts := make([]string, 0, len(gFirewallConfig.ForwardingRules))
+	for _, fw := range gFirewallConfig.ForwardingRules {
+		fwdParts = append(fwdParts, clientRuleSig(fw, fw.Client))
+	}
+	sort.Strings(fwdParts)
+	fwdSig := strings.Join(fwdParts, ";")
+	if fwdSig != forwardingClientCache {
+		flushForwardingMapsLocked()
+		forwardingClientCache = fwdSig
 	}
 
 	for _, fw := range gFirewallConfig.ForwardingRules {
@@ -932,6 +974,17 @@ func applyFirewallRulesLocked() {
 	outboundIfaceCache = newOutbound
 
 	//block rules
+	blockParts := make([]string, 0, len(gFirewallConfig.BlockRules))
+	for _, br := range gFirewallConfig.BlockRules {
+		blockParts = append(blockParts, clientRuleSig(br, br.Client))
+	}
+	sort.Strings(blockParts)
+	blockSig := strings.Join(blockParts, ";")
+	if blockSig != blockClientCache {
+		flushBlockMapsLocked()
+		blockClientCache = blockSig
+	}
+
 	for _, br := range gFirewallConfig.BlockRules {
 		for _, clientIP := range clientIPs(br.Client) {
 			is_installed := isBlockInstalled(br, clientIP)
@@ -1107,6 +1160,7 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 					deleteForwarding(fwd, clientIP, true, is_last)
 				}
 				FWmtx.Lock()
+				resyncForwardingLocked()
 				return
 			}
 		}
@@ -1124,8 +1178,10 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 			deleteForwarding(old_fwd, clientIP, true, is_last)
 		}
 		FWmtx.Lock()
+		resyncForwardingLocked()
 	} else {
 		gFirewallConfig.ForwardingRules = append(gFirewallConfig.ForwardingRules, fwd)
+		applyFirewallRulesLocked()
 	}
 
 	saveFirewallRulesLocked()
@@ -2050,6 +2106,8 @@ func loadInterfacesPublicConfig() []PublicInterfaceConfig {
 }
 
 var outboundIfaceCache = []string{}
+var forwardingClientCache = ""
+var blockClientCache = ""
 
 func collectOutbound() []string {
 	interfaces := loadInterfacesPublicConfig()
