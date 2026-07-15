@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -305,23 +306,39 @@ func isLastDomainLocked(addr Address) bool {
 
 	return is_last
 }
+
+func flushDNSCacheIfLastLocked(addr Address) {
+	if isLastDomainLocked(addr) {
+		flushDNSCache(addr)
+	}
+}
+
 func query(domain string) []string {
 	ips := []string{}
 
-	hosts, err := net.LookupIP(domain)
-	if err != nil {
-		fmt.Println("failed to look up domain "+domain, err)
-	} else {
-		for _, ip := range hosts {
-			ipv4 := ip.To4()
-			if ipv4 != nil {
-				ips = append(ips, ipv4.String())
-			}
-		}
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	hosts, err := net.DefaultResolver.LookupIP(ctx, "ip4", domain)
 
 	DNSCachemtx.Lock()
 	defer DNSCachemtx.Unlock()
+
+	if err != nil {
+		fmt.Println("failed to look up domain "+domain, err)
+		DNSCacheTime[domain] = time.Now().Add(30 * time.Second)
+		if prev := DNSCache[domain]; len(prev) != 0 {
+			ips = prev
+		}
+		DNSCache[domain] = ips
+		return ips
+	}
+
+	for _, ip := range hosts {
+		ipv4 := ip.To4()
+		if ipv4 != nil {
+			ips = append(ips, ipv4.String())
+		}
+	}
 
 	DNSCache[domain] = ips
 	//set expiration to current time + refresh interval

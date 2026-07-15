@@ -321,11 +321,17 @@ func executeUplinkCheck(rule UplinkCheckConfig) error {
 	return nil
 }
 
+func taskRuleActive(disabled bool, condition string, t TimeExpression, expiry int64) bool {
+	FWmtx.RLock()
+	defer FWmtx.RUnlock()
+	return ruleActive(disabled, condition, t, expiry)
+}
+
 func executeTasks() {
 
 	{
 		rule := gTaskConfig.WiFiScan
-		if ruleActive(rule.Disabled, rule.Condition, rule.Time, rule.Expiration) {
+		if taskRuleActive(rule.Disabled, rule.Condition, rule.Time, rule.Expiration) {
 			//run the wifi scan
 			executeWifiScan(rule)
 		}
@@ -334,7 +340,7 @@ func executeTasks() {
 
 	{
 		rule := gTaskConfig.UplinkCheck
-		if ruleActive(rule.Disabled, rule.Condition, rule.Time, rule.Expiration) {
+		if taskRuleActive(rule.Disabled, rule.Condition, rule.Time, rule.Expiration) {
 			//run the uplink check
 			executeUplinkCheck(rule)
 		}

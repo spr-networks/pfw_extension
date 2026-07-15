@@ -114,3 +114,7 @@ func AddInterfaceToSet(setName, iface string) error {
 func FlushMapByName(family, tableName, mapName string) error {
 	return errNotSupported
 }
+
+func AddDstSupernetworksAcceptRule(family, tableName, chainName string) error {
+	return errNotSupported
+}

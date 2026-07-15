@@ -23,7 +23,6 @@ import (
 	"os/exec"
 	"reflect"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -180,10 +179,17 @@ func getPFWConfig(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(x)
 }
 
+func atomicWriteFile(path string, data []byte) error {
+	tmp := path + ".tmp"
+	if err := ioutil.WriteFile(tmp, data, 0600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func saveFirewallRulesLocked() {
-	file, _ := json.MarshalIndent(gFirewallConfig, "", " ")
-	err := ioutil.WriteFile(FirewallConfigFile, file, 0600)
-	if err != nil {
+	data, _ := json.MarshalIndent(gFirewallConfig, "", " ")
+	if err := atomicWriteFile(FirewallConfigFile, data); err != nil {
 		fmt.Println(err)
 	}
 }
@@ -264,18 +270,18 @@ func validateClientIdentifier(client ClientIdentifier) error {
 func validateAddress(addr Address, field string) error {
 	if addr.IP != "" {
 		if CIDRorIP(addr.IP) != nil {
-			return fmt.Errorf("Invalid IP for " + field)
+			return fmt.Errorf("Invalid IP for %s", field)
 		}
 		if addr.Domain != "" {
-			return fmt.Errorf("Invalid cant have both IP and Domain for " + field)
+			return fmt.Errorf("Invalid cant have both IP and Domain for %s", field)
 		}
 	} else if addr.Domain == "" {
-		return fmt.Errorf("Need IP or Domain set for " + field)
+		return fmt.Errorf("Need IP or Domain set for %s", field)
 	} else {
 		if addr.Domain[0] == '/' {
 			//make sure it ends with / as well
 			if len(addr.Domain) < 3 || addr.Domain[len(addr.Domain)-1] != '/' {
-				return fmt.Errorf("Invalid regexp for " + field)
+				return fmt.Errorf("Invalid regexp for %s", field)
 			}
 
 			//compile it now
@@ -348,7 +354,9 @@ func updateDevice(identity string, entry DeviceEntry) {
 
 }
 
-func siteVPNDNS(iface string) string {
+var updateDeviceFunc = updateDevice
+
+func siteVPNDNSLocked(iface string) string {
 	if !strings.HasPrefix(iface, "site") {
 		return ""
 	}
@@ -356,8 +364,6 @@ func siteVPNDNS(iface string) string {
 	if err != nil {
 		return ""
 	}
-	FWmtx.RLock()
-	defer FWmtx.RUnlock()
 	if idx < 0 || idx >= len(gFirewallConfig.SiteVPNs) {
 		return ""
 	}
@@ -372,7 +378,7 @@ func setDeviceCustomDNS(clientIP, dns string) {
 	for identity, dev := range devices {
 		if dev.RecentIP == clientIP {
 			dev.DNSCustom = dns
-			updateDevice(identity, dev)
+			updateDeviceFunc(identity, dev)
 			return
 		}
 	}
@@ -396,16 +402,9 @@ func APIDevices() (map[string]DeviceEntry, error) {
 	return devs, nil
 }
 
-func clientIPs(client ClientIdentifier) []string {
-	//return a list of IPs from a ClientIdentifier
+func clientIPsFrom(devices map[string]DeviceEntry, client ClientIdentifier) []string {
 	if client.SrcIP != "" {
 		return []string{client.SrcIP}
-	}
-
-	devices, err := APIDevices()
-	if err != nil {
-		fmt.Println("[-] Failed to read devices info")
-		return []string{}
 	}
 
 	if client.Identity != "" {
@@ -457,102 +456,91 @@ func elementTimeout(addr Address) time.Duration {
 	return time.Duration(DNSInterval()) * time.Second
 }
 
-func isBlockInstalled(br BlockRule, clientIP string) bool {
-	client := GetNFTClient()
-	for _, dstIP := range resolve(br.Dst) {
-		key, _ := buildIPIPProtocolPortRangeKeys(clientIP, dstIP, br.Protocol, br.DstPort)
-		if key == nil {
-			return false
+type nftElemRef struct {
+	table   string
+	mapName string
+	key     []byte
+	keyEnd  []byte
+}
+
+func blockElemRefs(br BlockRule, clientIP, dstIP string) []nftElemRef {
+	key, keyEnd := buildIPIPProtocolPortRangeKeys(clientIP, dstIP, br.Protocol, br.DstPort)
+	if key == nil {
+		return nil
+	}
+	return []nftElemRef{{"filter", blockVmapName, key, keyEnd}}
+}
+
+func forwardingElemRefs(fwd ForwardingRule, clientIP, origDstIP string) []nftElemRef {
+	if fwd.DstInterface != "" {
+		if fwd.Protocol == "" {
+			fkey, fkeyEnd := buildIPIPIfaceRangeKeys(clientIP, origDstIP, fwd.DstInterface)
+			mkey, mkeyEnd := buildIPIPRangeKeys(clientIP, origDstIP)
+			return []nftElemRef{
+				{"filter", "site_forward", fkey, fkeyEnd},
+				{"mangle", "site_forward_mangle", mkey, mkeyEnd},
+			}
 		}
-		if client.GetMapElement(TableFamilyInet, "filter", blockVmapName, key) != nil {
-			return false
+		fkey, fkeyEnd := buildIPIPPortIfaceRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort, fwd.DstInterface)
+		mkey, mkeyEnd := buildIPIPPortRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort)
+		return []nftElemRef{
+			{"filter", "site_forward_" + fwd.Protocol + "_port", fkey, fkeyEnd},
+			{"mangle", "site_forward_" + fwd.Protocol + "_port_mangle", mkey, mkeyEnd},
 		}
 	}
 
-	return true
+	if fwd.OriginalDstPort != "" {
+		key, keyEnd := buildIPIPPortRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort)
+		return []nftElemRef{
+			{"nat", "dnat_" + fwd.Protocol + "_ipmap", key, keyEnd},
+			{"nat", "dnat_" + fwd.Protocol + "_portmap", key, keyEnd},
+		}
+	}
+
+	key, keyEnd := buildIPIPRangeKeys(clientIP, origDstIP)
+	return []nftElemRef{{"nat", "dnat_" + fwd.Protocol + "_anymap", key, keyEnd}}
+}
+
+func allElemRefsPresent(refs []nftElemRef) bool {
+	client := GetNFTClient()
+	for _, ref := range refs {
+		if client.GetMapElement(TableFamilyInet, ref.table, ref.mapName, ref.key) != nil {
+			return false
+		}
+	}
+	return len(refs) != 0
+}
+
+func deleteElemRefs(client *NFTClient, refs []nftElemRef) {
+	for _, ref := range refs {
+		client.DeleteMapElementRange(TableFamilyInet, ref.table, ref.mapName, ref.key, ref.keyEnd)
+	}
+}
+
+func anyElemRefPresent(refs []nftElemRef) bool {
+	client := GetNFTClient()
+	for _, ref := range refs {
+		if client.GetMapElement(TableFamilyInet, ref.table, ref.mapName, ref.key) == nil {
+			return true
+		}
+	}
+	return false
 }
 
 func addBlock(br BlockRule, clientIP string) error {
 	client := GetNFTClient()
 	for _, dstIP := range resolve(br.Dst) {
-		key, keyEnd := buildIPIPProtocolPortRangeKeys(clientIP, dstIP, br.Protocol, br.DstPort)
-
-		err := client.AddMapElementRangeWithTimeout(TableFamilyInet, "filter", blockVmapName,
-			key, keyEnd, []byte(blockVerdict), elementTimeout(br.Dst))
+		refs := blockElemRefs(br, clientIP, dstIP)
+		if len(refs) == 0 {
+			continue
+		}
+		err := addElemRefs(client, refs, [][]byte{[]byte(blockVerdict)}, elementTimeout(br.Dst))
 		if err != nil {
 			fmt.Println("failed to add element", err)
 			return err
 		}
 	}
 	return nil
-}
-
-func deleteBlock(br BlockRule, clientIP string, flushLast bool) error {
-	var err error
-	client := GetNFTClient()
-	for _, dstIP := range resolve(br.Dst) {
-		key, keyEnd := buildIPIPProtocolPortRangeKeys(clientIP, dstIP, br.Protocol, br.DstPort)
-		if key == nil {
-			continue
-		}
-
-		err = client.DeleteMapElementRange(TableFamilyInet, "filter", blockVmapName, key, keyEnd)
-		if err != nil {
-			fmt.Println("failed to delete element", err)
-		}
-	}
-
-	if flushLast {
-		flushDNSCache(br.Dst)
-	}
-
-	return err
-}
-
-func isForwardingInstalled(fwd ForwardingRule, clientIP string, useCachedOutbound bool) bool {
-	client := GetNFTClient()
-
-	if fwd.DstInterface != "" {
-
-		markDst := fwdDstIfaceToIndex(fwd.DstInterface, useCachedOutbound)
-		if markDst == "" {
-			fmt.Println("[-] PFW could not resolve mark for " + fwd.DstInterface)
-			return false
-		}
-
-		for _, origDstIP := range resolve(fwd.OriginalDst) {
-			var err error
-			if fwd.Protocol == "" {
-				//if a destination interface is set, only check clientIP and OriginalDstIP
-				key, _ := buildIPIPRangeKeys(clientIP, origDstIP)
-				err = client.GetMapElement(TableFamilyInet, "mangle", "site_forward_mangle", key)
-			} else {
-				//when a protocol is set -- add the port as well
-				key, _ := buildIPIPPortRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort)
-				err = client.GetMapElement(TableFamilyInet, "mangle", "site_forward_"+fwd.Protocol+"_port_mangle", key)
-			}
-
-			if err != nil {
-				return false
-			}
-		}
-	} else {
-		for _, origDstIP := range resolve(fwd.OriginalDst) {
-			var err error
-			if fwd.OriginalDstPort != "" {
-				key, _ := buildIPIPPortRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort)
-				err = client.GetMapElement(TableFamilyInet, "nat", "dnat_"+fwd.Protocol+"_ipmap", key)
-			} else {
-				key, _ := buildIPIPRangeKeys(clientIP, origDstIP)
-				err = client.GetMapElement(TableFamilyInet, "nat", "dnat_"+fwd.Protocol+"_anymap", key)
-			}
-
-			if err != nil {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 const IfaceMarkMapOffset = 4000
@@ -582,17 +570,11 @@ func getIfaceMarkMap(iface string) string {
 	}
 }
 
-func fwdDstIfaceToIndex(iface string, useCachedOutbound bool) string {
+func fwdDstIfaceToIndexLocked(iface string) string {
 	if !strings.HasPrefix(iface, "site") {
 
 		// check if this matches an outbound interface
-		outbound := []string{}
-		if useCachedOutbound {
-			outbound = outboundIfaceCache
-		} else {
-			outbound = collectOutbound()
-		}
-		for i, dev := range outbound {
+		for i, dev := range collectOutbound() {
 			if dev == iface {
 				return strconv.Itoa(i + OutboundRouteTableOffset)
 			}
@@ -609,165 +591,67 @@ func fwdDstIfaceToIndex(iface string, useCachedOutbound bool) string {
 	return strconv.Itoa(val + SiteMarkOffset)
 }
 
-func addForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool) error {
-	var err error
+func addForwarding(fwd ForwardingRule, clientIP string) error {
+	client := GetNFTClient()
+	timeout := elementTimeout(fwd.OriginalDst)
 
+	markDst := ""
 	if fwd.DstInterface != "" {
-		markDst := fwdDstIfaceToIndex(fwd.DstInterface, useCachedOutbound)
+		FWmtx.Lock()
+		markDst = fwdDstIfaceToIndexLocked(fwd.DstInterface)
+		FWmtx.Unlock()
 		if markDst == "" {
 			fmt.Println("[-] PFW could not resolve mark for " + fwd.DstInterface)
-			return fmt.Errorf("[-] Could not resolve mark for " + fwd.DstInterface)
+			return fmt.Errorf("[-] Could not resolve mark for %s", fwd.DstInterface)
 		}
 
 		//ensure mark chain exists
-		makeMangleChain(markDst)
-
-		//domains do NOT make sense on fwd.Dst when there is a DstInterace set
-		if fwd.Dst.IP != "" {
-			makeMarkRouteAndRules(fwd.DstInterface, markDst, fwd.Dst.IP)
-		} else {
-			makeMarkRouteAndRules(fwd.DstInterface, markDst, "0.0.0.0/0")
+		if cerr := makeMangleChain(markDst); cerr != nil {
+			return cerr
 		}
 
-		client := GetNFTClient()
-		timeout := elementTimeout(fwd.OriginalDst)
-
-		for _, origDstIP := range resolve(fwd.OriginalDst) {
-
-			if fwd.Protocol == "" {
-				//if a destination interface is set, only check clientIP and OriginalDstIP
-
-				fkey, fkeyEnd := buildIPIPIfaceRangeKeys(clientIP, origDstIP, fwd.DstInterface)
-				client.AddMapElementRangeWithTimeout(TableFamilyInet, "filter", "site_forward",
-					fkey, fkeyEnd, []byte("accept"), timeout)
-
-				mkey, mkeyEnd := buildIPIPRangeKeys(clientIP, origDstIP)
-				err = client.AddMapElementRangeWithTimeout(TableFamilyInet, "mangle", "site_forward_mangle",
-					mkey, mkeyEnd, []byte("jump mark"+markDst), timeout)
-
-			} else {
-				//when a protocol is set -- add the port as well
-				fkey, fkeyEnd := buildIPIPPortIfaceRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort, fwd.DstInterface)
-				client.AddMapElementRangeWithTimeout(TableFamilyInet, "filter", "site_forward_"+fwd.Protocol+"_port",
-					fkey, fkeyEnd, []byte("accept"), timeout)
-
-				mkey, mkeyEnd := buildIPIPPortRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort)
-				err = client.AddMapElementRangeWithTimeout(TableFamilyInet, "mangle", "site_forward_"+fwd.Protocol+"_port_mangle",
-					mkey, mkeyEnd, []byte("jump mark"+markDst), timeout)
-			}
-
-			if err != nil {
-				fmt.Println("failed to add element", err)
-			}
-
+		routeDst := fwd.Dst.IP
+		if routeDst == "" {
+			routeDst = "0.0.0.0/0"
 		}
-	} else {
-		client := GetNFTClient()
-		timeout := elementTimeout(fwd.OriginalDst)
-
-		for _, origDstIP := range resolve(fwd.OriginalDst) {
-			if fwd.OriginalDstPort != "" {
-				key, keyEnd := buildIPIPPortRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort)
-				err = client.AddMapElementRangeWithTimeout(TableFamilyInet, "nat", "dnat_"+fwd.Protocol+"_ipmap",
-					key, keyEnd, IPToBytes(fwd.Dst.IP), timeout)
-				if err != nil {
-					fmt.Println("failed to add element", err)
-					return err
-				}
-
-				err = client.AddMapElementRangeWithTimeout(TableFamilyInet, "nat", "dnat_"+fwd.Protocol+"_portmap",
-					key, keyEnd, PortToBytes(fwd.DstPort), timeout)
-
-			} else {
-				key, keyEnd := buildIPIPRangeKeys(clientIP, origDstIP)
-				err = client.AddMapElementRangeWithTimeout(TableFamilyInet, "nat", "dnat_"+fwd.Protocol+"_anymap",
-					key, keyEnd, IPToBytes(fwd.Dst.IP), timeout)
-			}
-
-			if err != nil {
-				fmt.Println("failed to add element", err)
-			}
+		if rerr := makeMarkRouteAndRules(fwd.DstInterface, markDst, routeDst); rerr != nil {
+			return rerr
 		}
 	}
 
-	if fwd.OriginalDst.IP == "0.0.0.0/0" && strings.HasPrefix(fwd.DstInterface, "site") {
-		ip, iface := clientIP, fwd.DstInterface
-		go func() {
-			if dns := siteVPNDNS(iface); dns != "" {
-				setDeviceCustomDNS(ip, dns)
-			}
-		}()
-	}
-
-	return err
-}
-
-func deleteForwarding(fwd ForwardingRule, clientIP string, useCachedOutbound bool, flushLast bool) error {
 	var err error
-	if fwd.DstInterface != "" {
-		markDst := fwdDstIfaceToIndex(fwd.DstInterface, useCachedOutbound)
-		if markDst == "" {
-			fmt.Println("[-] PFW could not resolve mark for " + fwd.DstInterface)
-			return fmt.Errorf("[-] Could not resolve mark for " + fwd.DstInterface)
+	for _, origDstIP := range resolve(fwd.OriginalDst) {
+		refs := forwardingElemRefs(fwd, clientIP, origDstIP)
+
+		var values [][]byte
+		if fwd.DstInterface != "" {
+			values = [][]byte{[]byte("accept"), []byte("jump mark" + markDst)}
+		} else if fwd.OriginalDstPort != "" {
+			values = [][]byte{IPToBytes(fwd.Dst.IP), PortToBytes(fwd.DstPort)}
+		} else {
+			values = [][]byte{IPToBytes(fwd.Dst.IP)}
 		}
 
-		client := GetNFTClient()
-
-		for _, origDstIP := range resolve(fwd.OriginalDst) {
-
-			if fwd.Protocol == "" {
-				//if a destination interface is set, only check clientIP and OriginalDstIP
-				fkey, fkeyEnd := buildIPIPIfaceRangeKeys(clientIP, origDstIP, fwd.DstInterface)
-				client.DeleteMapElementRange(TableFamilyInet, "filter", "site_forward", fkey, fkeyEnd)
-
-				mkey, mkeyEnd := buildIPIPRangeKeys(clientIP, origDstIP)
-				client.DeleteMapElementRange(TableFamilyInet, "mangle", "site_forward_mangle", mkey, mkeyEnd)
-			} else {
-
-				fkey, fkeyEnd := buildIPIPPortIfaceRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort, fwd.DstInterface)
-				client.DeleteMapElementRange(TableFamilyInet, "filter", "site_forward_"+fwd.Protocol+"_port", fkey, fkeyEnd)
-
-				mkey, mkeyEnd := buildIPIPPortRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort)
-				client.DeleteMapElementRange(TableFamilyInet, "mangle", "site_forward_"+fwd.Protocol+"_port_mangle", mkey, mkeyEnd)
-			}
+		if aerr := addElemRefs(client, refs, values, timeout); aerr != nil {
+			fmt.Println("failed to add element", aerr)
+			err = aerr
 		}
-	} else {
-		client := GetNFTClient()
-
-		for _, origDstIP := range resolve(fwd.OriginalDst) {
-			if fwd.OriginalDstPort != "" {
-				key, keyEnd := buildIPIPPortRangeKeys(clientIP, origDstIP, fwd.OriginalDstPort)
-				err = client.DeleteMapElementRange(TableFamilyInet, "nat", "dnat_"+fwd.Protocol+"_ipmap", key, keyEnd)
-				if err != nil {
-					fmt.Println("failed to delete element", err)
-				}
-
-				err = client.DeleteMapElementRange(TableFamilyInet, "nat", "dnat_"+fwd.Protocol+"_portmap", key, keyEnd)
-
-			} else {
-				key, keyEnd := buildIPIPRangeKeys(clientIP, origDstIP)
-				err = client.DeleteMapElementRange(TableFamilyInet, "nat", "dnat_"+fwd.Protocol+"_anymap", key, keyEnd)
-			}
-
-			if err != nil {
-				fmt.Println("failed to delete element", err)
-			}
-		}
-	}
-
-	if flushLast {
-		flushDNSCache(fwd.OriginalDst)
-	}
-
-	if fwd.OriginalDst.IP == "0.0.0.0/0" && strings.HasPrefix(fwd.DstInterface, "site") {
-		ip := clientIP
-		go setDeviceCustomDNS(ip, "0")
 	}
 
 	return err
 }
 
-// https://stackoverflow.com/questions/55093676/checking-if-current-time-is-in-a-given-interval-golang
+func addElemRefs(client *NFTClient, refs []nftElemRef, values [][]byte, timeout time.Duration) error {
+	for i, ref := range refs {
+		err := client.AddMapElementRangeWithTimeout(TableFamilyInet, ref.table, ref.mapName, ref.key, ref.keyEnd, values[i], timeout)
+		if err != nil {
+			deleteElemRefs(client, refs[:i])
+			return err
+		}
+	}
+	return nil
+}
+
 func inTimeSpan(start, end, check time.Time) bool {
 	if start.Before(end) {
 		return !check.Before(start) && !check.After(end)
@@ -899,125 +783,438 @@ func ruleExpired(expiry int64) bool {
 	return false
 }
 
-func flushBlockMapsLocked() {
-	client := GetNFTClient()
-	client.FlushMap(TableFamilyInet, "filter", blockVmapName)
-}
+var reconcileMtx sync.Mutex
 
-func clientRuleSig(rule interface{}, client ClientIdentifier) string {
-	ips := clientIPs(client)
-	sort.Strings(ips)
-	key, _ := json.Marshal(rule)
-	return string(key) + "=" + strings.Join(ips, ",")
-}
+func reconcileNow() {
+	reconcileMtx.Lock()
+	defer reconcileMtx.Unlock()
 
-func flushForwardingMapsLocked() {
-	client := GetNFTClient()
-	client.FlushMap(TableFamilyInet, "filter", "site_forward")
-	client.FlushMap(TableFamilyInet, "mangle", "site_forward_mangle")
-	for _, protocol := range []string{"tcp", "udp"} {
-		client.FlushMap(TableFamilyInet, "filter", "site_forward_"+protocol+"_port")
-		client.FlushMap(TableFamilyInet, "mangle", "site_forward_"+protocol+"_port_mangle")
-		client.FlushMap(TableFamilyInet, "nat", "dnat_"+protocol+"_ipmap")
-		client.FlushMap(TableFamilyInet, "nat", "dnat_"+protocol+"_portmap")
-		client.FlushMap(TableFamilyInet, "nat", "dnat_"+protocol+"_anymap")
+	cfg := snapshotConfig()
+
+	devices, err := APIDevices()
+	if err != nil {
+		devices = map[string]DeviceEntry{}
 	}
-}
 
-func resyncForwardingLocked() {
-	flushForwardingMapsLocked()
-	applyFirewallRulesLocked()
-}
-
-func applyFirewallRulesLocked() {
-
-	//forwarding rules
-
-	refreshForwardOutbound := false
 	newOutbound := collectOutbound()
-	if !reflect.DeepEqual(newOutbound, outboundIfaceCache) {
-		//the list of outbounds changed. All site forwarding needs to be updated
-		refreshForwardOutbound = true
-	}
+	refreshForwardOutbound := !reflect.DeepEqual(newOutbound, outboundIfaceCache)
 
-	fwdParts := make([]string, 0, len(gFirewallConfig.ForwardingRules))
-	for _, fw := range gFirewallConfig.ForwardingRules {
-		fwdParts = append(fwdParts, clientRuleSig(fw, fw.Client))
-	}
-	sort.Strings(fwdParts)
-	fwdSig := strings.Join(fwdParts, ";")
-	if fwdSig != forwardingClientCache {
-		flushForwardingMapsLocked()
-		forwardingClientCache = fwdSig
-	}
-
-	for _, fw := range gFirewallConfig.ForwardingRules {
-		for _, clientIP := range clientIPs(fw.Client) {
-
-			if fw.DstInterface != "" && refreshForwardOutbound {
-				//delete the old forwarding entry using the cache
-				deleteForwarding(fw, clientIP, true, false)
-			}
-
-			is_installed := isForwardingInstalled(fw, clientIP, false)
-			if ruleActive(fw.Disabled, fw.Condition, fw.Time, fw.Expiration) {
-				if !is_installed {
-					addForwarding(fw, clientIP, false)
-				}
-			} else if is_installed {
-				deleteForwarding(fw, clientIP, false, false)
-			}
-
-		}
-	}
+	installedForwards = reconcileRules(cfg.ForwardingRules, installedForwards,
+		ruleOps[ForwardingRule]{
+			clientIPs: func(fw ForwardingRule) []string { return clientIPsFrom(devices, fw.Client) },
+			resolve:   func(fw ForwardingRule) []string { return resolve(fw.OriginalDst) },
+			active: func(fw ForwardingRule) bool {
+				return ruleActive(fw.Disabled, fw.Condition, fw.Time, fw.Expiration)
+			},
+			refs:    forwardingElemRefs,
+			install: func(fw ForwardingRule, clientIP string) { addForwarding(fw, clientIP) },
+			needsRebuild: func(fw ForwardingRule) bool {
+				return fw.DstInterface != "" && refreshForwardOutbound
+			},
+		})
 
 	outboundIfaceCache = newOutbound
 
-	//block rules
-	blockParts := make([]string, 0, len(gFirewallConfig.BlockRules))
-	for _, br := range gFirewallConfig.BlockRules {
-		blockParts = append(blockParts, clientRuleSig(br, br.Client))
+	installedBlocks = reconcileRules(cfg.BlockRules, installedBlocks,
+		ruleOps[BlockRule]{
+			clientIPs: func(br BlockRule) []string { return clientIPsFrom(devices, br.Client) },
+			resolve:   func(br BlockRule) []string { return resolve(br.Dst) },
+			active: func(br BlockRule) bool {
+				return ruleActive(br.Disabled, br.Condition, br.Time, br.Expiration)
+			},
+			refs:    blockElemRefs,
+			install: func(br BlockRule, clientIP string) { addBlock(br, clientIP) },
+		})
+
+	syncDeviceState(cfg, devices)
+
+	saveInstalledState()
+}
+
+type configSnapshot struct {
+	ForwardingRules []ForwardingRule
+	BlockRules      []BlockRule
+	TagRules        []TagRule
+	GroupRules      []GroupRule
+	SiteDNS         map[string]string //site iface -> DNS server, "" filtered
+}
+
+func snapshotConfig() configSnapshot {
+	FWmtx.RLock()
+	defer FWmtx.RUnlock()
+
+	cfg := configSnapshot{
+		ForwardingRules: append([]ForwardingRule{}, gFirewallConfig.ForwardingRules...),
+		BlockRules:      append([]BlockRule{}, gFirewallConfig.BlockRules...),
+		TagRules:        append([]TagRule{}, gFirewallConfig.TagRules...),
+		GroupRules:      append([]GroupRule{}, gFirewallConfig.GroupRules...),
+		SiteDNS:         map[string]string{},
 	}
-	sort.Strings(blockParts)
-	blockSig := strings.Join(blockParts, ";")
-	if blockSig != blockClientCache {
-		flushBlockMapsLocked()
-		blockClientCache = blockSig
+	for i := range gFirewallConfig.SiteVPNs {
+		if dns := gFirewallConfig.SiteVPNs[i].DNS; dns != "" {
+			cfg.SiteDNS[fmt.Sprintf("site%d", i)] = dns
+		}
+	}
+	return cfg
+}
+
+func withConfigMutation(h func(w http.ResponseWriter, r *http.Request, changed *bool)) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		changed := false
+		func() {
+			FWmtx.Lock()
+			defer FWmtx.Unlock()
+			h(w, r, &changed)
+		}()
+		if changed {
+			reconcileNow()
+		}
+	}
+}
+
+type installedRule[R any] struct {
+	Rule R
+	IPs  map[string]map[string]bool
+}
+
+type installedFwd = installedRule[ForwardingRule]
+type installedBlk = installedRule[BlockRule]
+
+type ruleOps[R any] struct {
+	clientIPs    func(R) []string
+	resolve      func(R) []string
+	active       func(R) bool
+	refs         func(r R, clientIP, dstIP string) []nftElemRef
+	install      func(r R, clientIP string)
+	needsRebuild func(R) bool
+}
+
+func (ops ruleOps[R]) refsFor(r R, clientIP string) func(string) []nftElemRef {
+	return func(dstIP string) []nftElemRef { return ops.refs(r, clientIP, dstIP) }
+}
+
+func reconcileRules[R any](rules []R, prev map[string]installedRule[R], ops ruleOps[R]) map[string]installedRule[R] {
+	keys := make([]string, len(rules))
+	for i, r := range rules {
+		k, _ := json.Marshal(r)
+		keys[i] = string(k)
+	}
+	desired := listToSet(keys)
+
+	next := map[string]installedRule[R]{}
+
+	for key, entry := range prev {
+		if desired[key] {
+			continue
+		}
+		rule := entry.Rule
+		leftIPs := map[string]map[string]bool{}
+		for clientIP, dstIPs := range entry.IPs {
+			if left := deleteElements(ops.refsFor(rule, clientIP), dstIPs); len(left) != 0 {
+				leftIPs[clientIP] = left
+			}
+		}
+		if len(leftIPs) != 0 {
+			next[key] = installedRule[R]{rule, leftIPs}
+		}
 	}
 
-	for _, br := range gFirewallConfig.BlockRules {
-		for _, clientIP := range clientIPs(br.Client) {
-			is_installed := isBlockInstalled(br, clientIP)
-			if ruleActive(br.Disabled, br.Condition, br.Time, br.Expiration) {
-				if !is_installed {
-					addBlock(br, clientIP)
-				}
-			} else if is_installed {
-				deleteBlock(br, clientIP, false)
+	for i, r := range rules {
+		key := keys[i]
+		tracked := prev[key].IPs
+		current := listToSet(ops.clientIPs(r))
+		resolved := listToSet(ops.resolve(r))
+		active := ops.active(r)
+		rebuild := ops.needsRebuild != nil && ops.needsRebuild(r)
+
+		nowIPs := map[string]map[string]bool{}
+
+		for clientIP, dstIPs := range tracked {
+			if current[clientIP] {
+				continue
+			}
+			if left := deleteElements(ops.refsFor(r, clientIP), dstIPs); len(left) != 0 {
+				nowIPs[clientIP] = left
+			}
+		}
+
+		for clientIP := range current {
+			trackedIPs := tracked[clientIP]
+			refsFor := ops.refsFor(r, clientIP)
+
+			if rebuild {
+				trackedIPs = deleteElements(refsFor, unionSets(trackedIPs, resolved))
 			}
 
+			if active {
+				if needsInstall(refsFor, resolved) {
+					ops.install(r, clientIP)
+				}
+				set := cloneSet(resolved)
+				for dstIP := range trackedIPs {
+					if !set[dstIP] && anyElemRefPresent(refsFor(dstIP)) {
+						set[dstIP] = true
+					}
+				}
+				nowIPs[clientIP] = set
+			} else {
+				if left := deleteElements(refsFor, unionSets(trackedIPs, resolved)); len(left) != 0 {
+					nowIPs[clientIP] = left
+				}
+			}
+		}
+		if len(nowIPs) != 0 {
+			next[key] = installedRule[R]{r, nowIPs}
 		}
 	}
 
-	//tag assignment rules
-	for _, rule := range gFirewallConfig.TagRules {
-		if ruleActive(rule.Disabled, rule.Condition, rule.Time, rule.Expiration) {
-			addClient("tag", rule.Client, rule.Tags)
-		} else {
-			removeClient("tag", rule.Client, rule.Tags)
+	return next
+}
+
+func needsInstall(refsFor func(dstIP string) []nftElemRef, resolved map[string]bool) bool {
+	client := GetNFTClient()
+	needs := false
+	for dstIP := range resolved {
+		refs := refsFor(dstIP)
+		if len(refs) == 0 || allElemRefsPresent(refs) {
+			continue
+		}
+		if anyElemRefPresent(refs) {
+			deleteElemRefs(client, refs)
+		}
+		needs = true
+	}
+	return needs
+}
+
+func deleteElements(refsFor func(dstIP string) []nftElemRef, dstIPs map[string]bool) map[string]bool {
+	client := GetNFTClient()
+	remaining := map[string]bool{}
+
+	for dstIP := range dstIPs {
+		refs := refsFor(dstIP)
+		if len(refs) == 0 {
+			continue
+		}
+
+		deleteElemRefs(client, refs)
+		if anyElemRefPresent(refs) {
+			fmt.Println("[-] PFW failed to delete elements for", dstIP)
+			remaining[dstIP] = true
 		}
 	}
 
-	//group assignment rules
-	for _, rule := range gFirewallConfig.GroupRules {
-		if ruleActive(rule.Disabled, rule.Condition, rule.Time, rule.Expiration) {
-			addClient("group", rule.Client, rule.Groups)
-		} else {
-			removeClient("group", rule.Client, rule.Groups)
+	return remaining
+}
+
+var appliedTags = map[string]map[string]bool{}
+var appliedGroups = map[string]map[string]bool{}
+var siteDNSClients = map[string]string{}
+
+func syncDeviceState(cfg configSnapshot, devices map[string]DeviceEntry) {
+	desiredTags := map[string]map[string]bool{}
+	desiredGroups := map[string]map[string]bool{}
+	for _, rule := range cfg.TagRules {
+		if !ruleActive(rule.Disabled, rule.Condition, rule.Time, rule.Expiration) {
+			continue
+		}
+		collectDesiredValues(desiredTags, devices, rule.Client, rule.Tags)
+	}
+	for _, rule := range cfg.GroupRules {
+		if !ruleActive(rule.Disabled, rule.Condition, rule.Time, rule.Expiration) {
+			continue
+		}
+		collectDesiredValues(desiredGroups, devices, rule.Client, rule.Groups)
+	}
+
+	for identity, entry := range devices {
+		newTags, tagsChanged := mergeValues(entry.DeviceTags, desiredTags[identity], appliedTags[identity])
+		newGroups, groupsChanged := mergeValues(entry.Groups, desiredGroups[identity], appliedGroups[identity])
+		if tagsChanged || groupsChanged {
+			entry.DeviceTags = newTags
+			entry.Groups = newGroups
+			updateDeviceFunc(identity, entry)
 		}
 	}
 
-	//future: service tags ?
+	appliedTags = desiredTags
+	appliedGroups = desiredGroups
+
+	syncSiteDNS(cfg, devices)
+}
+
+func collectDesiredValues(desired map[string]map[string]bool, devices map[string]DeviceEntry, client ClientIdentifier, values []string) {
+	for identity, entry := range devices {
+		if !matchClient(client, entry, identity) {
+			continue
+		}
+		set := desired[identity]
+		if set == nil {
+			set = map[string]bool{}
+			desired[identity] = set
+		}
+		for _, v := range values {
+			set[v] = true
+		}
+	}
+}
+
+func mergeValues(current []string, desired, applied map[string]bool) ([]string, bool) {
+	out := []string{}
+	changed := false
+	have := map[string]bool{}
+	for _, v := range current {
+		if applied[v] && !desired[v] {
+			changed = true
+			continue
+		}
+		out = append(out, v)
+		have[v] = true
+	}
+	for v := range desired {
+		if !have[v] {
+			out = append(out, v)
+			changed = true
+		}
+	}
+	return out, changed
+}
+
+func syncSiteDNS(cfg configSnapshot, devices map[string]DeviceEntry) {
+	type siteCover struct{ iface, dns string }
+	desired := map[string]siteCover{}
+	for _, fw := range cfg.ForwardingRules {
+		if fw.OriginalDst.IP != "0.0.0.0/0" || !strings.HasPrefix(fw.DstInterface, "site") {
+			continue
+		}
+		if !ruleActive(fw.Disabled, fw.Condition, fw.Time, fw.Expiration) {
+			continue
+		}
+		dns := cfg.SiteDNS[fw.DstInterface]
+		if dns == "" {
+			continue
+		}
+		for _, ip := range clientIPsFrom(devices, fw.Client) {
+			desired[ip] = siteCover{fw.DstInterface, dns}
+		}
+	}
+
+	for ip, cover := range desired {
+		if siteDNSClients[ip] != cover.iface {
+			setDeviceCustomDNS(ip, cover.dns)
+			siteDNSClients[ip] = cover.iface
+		}
+	}
+	for ip := range siteDNSClients {
+		if _, ok := desired[ip]; !ok {
+			setDeviceCustomDNS(ip, "0")
+			delete(siteDNSClients, ip)
+		}
+	}
+}
+
+type savedInstalledState struct {
+	Forwards map[string]installedFwd
+	Blocks   map[string]installedBlk
+	SiteDNS  map[string]string
+	Tags     map[string]map[string]bool
+	Groups   map[string]map[string]bool
+}
+
+var InstalledStateFile = TEST_PREFIX + "/state/plugins/pfw/installed.json"
+var lastInstalledStateSaved []byte
+
+func saveInstalledState() {
+	data, err := json.Marshal(savedInstalledState{installedForwards, installedBlocks, siteDNSClients, appliedTags, appliedGroups})
+	if err != nil || bytes.Equal(data, lastInstalledStateSaved) {
+		return
+	}
+	if werr := atomicWriteFile(InstalledStateFile, data); werr != nil {
+		fmt.Println("failed to write installed state", werr)
+		return
+	}
+	lastInstalledStateSaved = data
+}
+
+func loadInstalledState() {
+	data, err := ioutil.ReadFile(InstalledStateFile)
+	if err != nil {
+		return
+	}
+	state := savedInstalledState{}
+	if json.Unmarshal(data, &state) != nil {
+		return
+	}
+	if state.Forwards != nil {
+		installedForwards = state.Forwards
+	}
+	if state.Blocks != nil {
+		installedBlocks = state.Blocks
+	}
+	if state.SiteDNS != nil {
+		siteDNSClients = state.SiteDNS
+	}
+	if state.Tags != nil {
+		appliedTags = state.Tags
+	}
+	if state.Groups != nil {
+		appliedGroups = state.Groups
+	}
+}
+
+func listToSet(l []string) map[string]bool {
+	m := map[string]bool{}
+	for _, k := range l {
+		m[k] = true
+	}
+	return m
+}
+
+func cloneSet(a map[string]bool) map[string]bool {
+	m := make(map[string]bool, len(a))
+	for k := range a {
+		m[k] = true
+	}
+	return m
+}
+
+func unionSets(a, b map[string]bool) map[string]bool {
+	m := cloneSet(a)
+	for k := range b {
+		m[k] = true
+	}
+	return m
+}
+
+func ruleTimer() {
+	go func() {
+		ticker := time.NewTicker(1 * time.Second)
+		for range ticker.C {
+			reconcileNow()
+		}
+	}()
+}
+
+var installedForwards = map[string]installedFwd{}
+var installedBlocks = map[string]installedBlk{}
+
+func validPortSpec(port string) bool {
+	parts := strings.Split(port, "-")
+	if len(parts) > 2 {
+		return false
+	}
+	prev := -1
+	for _, p := range parts {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 0 || n > 65535 {
+			return false
+		}
+		if n < prev {
+			return false
+		}
+		prev = n
+	}
+	return true
 }
 
 func CIDRorIP(IP string) error {
@@ -1033,9 +1230,7 @@ func CIDRorIP(IP string) error {
 	return err
 }
 
-func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
-	FWmtx.Lock()
-	defer FWmtx.Unlock()
+func modifyForwardRules(w http.ResponseWriter, r *http.Request, changed *bool) {
 
 	vars := mux.Vars(r)
 	indexStr, index_ok := vars["index"]
@@ -1066,7 +1261,7 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if fwd.DstInterface != "" {
-			dst_idx := fwdDstIfaceToIndex(fwd.DstInterface, false)
+			dst_idx := fwdDstIfaceToIndexLocked(fwd.DstInterface)
 			if dst_idx == "" {
 				http.Error(w, "Forwarding Interfaces must start with site[0-9]+ or match an active outbound interface ", 400)
 				return
@@ -1088,9 +1283,7 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 					fwd.OriginalDstPort = "0-65535"
 				}
 
-				re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
-
-				if !re.MatchString(fwd.OriginalDstPort) {
+				if !validPortSpec(fwd.OriginalDstPort) {
 					http.Error(w, "Invalid OriginalDstPort", 400)
 					return
 				}
@@ -1104,14 +1297,12 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 
-			re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
-
-			if fwd.DstPort != "" && !re.MatchString(fwd.DstPort) {
+			if fwd.DstPort != "" && !validPortSpec(fwd.DstPort) {
 				http.Error(w, "Invalid DstPort", 400)
 				return
 			}
 
-			if fwd.OriginalDstPort != "" && !re.MatchString(fwd.OriginalDstPort) {
+			if fwd.OriginalDstPort != "" && !validPortSpec(fwd.OriginalDstPort) {
 				http.Error(w, "Invalid OriginalDstPort", 400)
 				return
 			}
@@ -1154,13 +1345,8 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 			if fwd == a {
 				gFirewallConfig.ForwardingRules = append(gFirewallConfig.ForwardingRules[:i], gFirewallConfig.ForwardingRules[i+1:]...)
 				saveFirewallRulesLocked()
-				is_last := isLastDomainLocked(fwd.OriginalDst)
-				FWmtx.Unlock()
-				for _, clientIP := range clientIPs(fwd.Client) {
-					deleteForwarding(fwd, clientIP, true, is_last)
-				}
-				FWmtx.Lock()
-				resyncForwardingLocked()
+				flushDNSCacheIfLastLocked(fwd.OriginalDst)
+				*changed = true
 				return
 			}
 		}
@@ -1172,24 +1358,15 @@ func modifyForwardRules(w http.ResponseWriter, r *http.Request) {
 		//update existing index with the new fwd
 		old_fwd := gFirewallConfig.ForwardingRules[index]
 		gFirewallConfig.ForwardingRules[index] = fwd
-		is_last := isLastDomainLocked(old_fwd.OriginalDst)
-		FWmtx.Unlock()
-		for _, clientIP := range clientIPs(old_fwd.Client) {
-			deleteForwarding(old_fwd, clientIP, true, is_last)
-		}
-		FWmtx.Lock()
-		resyncForwardingLocked()
+		flushDNSCacheIfLastLocked(old_fwd.OriginalDst)
 	} else {
 		gFirewallConfig.ForwardingRules = append(gFirewallConfig.ForwardingRules, fwd)
-		applyFirewallRulesLocked()
 	}
-
 	saveFirewallRulesLocked()
+	*changed = true
 }
 
-func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
-	FWmtx.Lock()
-	defer FWmtx.Unlock()
+func modifyBlockRules(w http.ResponseWriter, r *http.Request, changed *bool) {
 
 	vars := mux.Vars(r)
 	indexStr, index_ok := vars["index"]
@@ -1224,9 +1401,7 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		re := regexp.MustCompile("^([0-9].*-[0-9].*|[0-9]*)$")
-
-		if !re.MatchString(br.DstPort) {
+		if br.DstPort != "" && !validPortSpec(br.DstPort) {
 			http.Error(w, "Invalid DstPort", 400)
 			return
 		}
@@ -1256,13 +1431,8 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 			if br == a {
 				gFirewallConfig.BlockRules = append(gFirewallConfig.BlockRules[:i], gFirewallConfig.BlockRules[i+1:]...)
 				saveFirewallRulesLocked()
-				is_last := isLastDomainLocked(br.Dst)
-				FWmtx.Unlock()
-				//delete the block rules for the clients where it applies
-				for _, clientIP := range clientIPs(br.Client) {
-					deleteBlock(br, clientIP, is_last)
-				}
-				FWmtx.Lock()
+				flushDNSCacheIfLastLocked(br.Dst)
+				*changed = true
 				return
 			}
 		}
@@ -1271,21 +1441,14 @@ func modifyBlockRules(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if index_ok {
-		//delete the block rules for the clients where it applies
 		old_br := gFirewallConfig.BlockRules[index]
-		//update existing index with the new br
 		gFirewallConfig.BlockRules[index] = br
-		is_last := isLastDomainLocked(old_br.Dst)
-		FWmtx.Unlock()
-		for _, clientIP := range clientIPs(old_br.Client) {
-			deleteBlock(old_br, clientIP, is_last)
-		}
-		FWmtx.Lock()
-
+		flushDNSCacheIfLastLocked(old_br.Dst)
 	} else {
 		gFirewallConfig.BlockRules = append(gFirewallConfig.BlockRules, br)
 	}
 	saveFirewallRulesLocked()
+	*changed = true
 }
 
 type KeyPair struct {
@@ -1770,23 +1933,6 @@ func testExpression(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(value)
 }
 
-func ruleTimer() {
-	runTimer := func() {
-		ticker := time.NewTicker(1 * time.Second)
-		for {
-			select {
-			case <-ticker.C:
-				//every 1s check the firewall rules
-				FWmtx.Lock()
-				applyFirewallRulesLocked()
-				FWmtx.Unlock()
-			}
-		}
-	}
-
-	go runTimer()
-}
-
 func busListener() {
 	go func() {
 		for i := 30; i > 0; i-- {
@@ -1830,105 +1976,7 @@ func matchClient(client ClientIdentifier, entry DeviceEntry, identity string) bo
 	return false
 }
 
-func removeClient(property string, client ClientIdentifier, values []string) {
-
-	devices, err := APIDevices()
-	if err != nil {
-		fmt.Println("[-] Failed to read devices info")
-		return
-	}
-
-	for identity, entry := range devices {
-		if matchClient(client, entry, identity) {
-
-			entry_vals := entry.Groups
-			if property == "tag" {
-				entry_vals = entry.DeviceTags
-			}
-
-			newValues := []string{}
-
-			//for each of the entry values, remove any that match values
-			for _, cur_val := range entry_vals {
-				keep_value := true
-				for _, new_val := range values {
-					if new_val == cur_val {
-						//found one to remove
-						keep_value = false
-						break
-					}
-				}
-				if keep_value {
-					newValues = append(newValues, cur_val)
-				}
-			}
-
-			if len(newValues) != len(entry_vals) {
-				//a change needs to be made, send update
-				if property == "group" {
-					entry.Groups = newValues
-				} else {
-					entry.DeviceTags = newValues
-				}
-				updateDevice(identity, entry)
-			}
-
-		}
-	}
-
-}
-
-func addClient(property string, client ClientIdentifier, values []string) {
-
-	devices, err := APIDevices()
-	if err != nil {
-		fmt.Println("[-] Failed to read devices info")
-		return
-	}
-
-	for identity, entry := range devices {
-		if matchClient(client, entry, identity) {
-
-			entry_vals := entry.Groups
-			if property == "tag" {
-				entry_vals = entry.DeviceTags
-			}
-
-			newValues := entry_vals
-
-			//add any unique new values
-			for _, new_val := range values {
-				existing_value := false
-				for _, cur_val := range entry_vals {
-					if new_val == cur_val {
-						//already contains this new value
-						existing_value = true
-						break
-					}
-				}
-				if !existing_value {
-					newValues = append(newValues, new_val)
-				}
-			}
-
-			if len(newValues) != len(entry_vals) {
-				//a change needs to be made, send update
-				if property == "group" {
-					entry.Groups = newValues
-				} else {
-					entry.DeviceTags = newValues
-				}
-				updateDevice(identity, entry)
-			}
-
-		}
-	}
-
-}
-
-func modifyTags(w http.ResponseWriter, r *http.Request) {
-	FWmtx.Lock()
-	defer FWmtx.Unlock()
+func modifyTags(w http.ResponseWriter, r *http.Request, changed *bool) {
 
 	vars := mux.Vars(r)
 	indexStr, index_ok := vars["index"]
@@ -1971,11 +2019,7 @@ func modifyTags(w http.ResponseWriter, r *http.Request) {
 			if reflect.DeepEqual(rule, a) {
 				gFirewallConfig.TagRules = append(gFirewallConfig.TagRules[:i], gFirewallConfig.TagRules[i+1:]...)
 				saveFirewallRulesLocked()
-
-				FWmtx.Unlock()
-				//delete the tag for the clients where it applies
-				removeClient("tag", rule.Client, rule.Tags)
-				FWmtx.Lock()
+				*changed = true
 				return
 			}
 		}
@@ -1984,22 +2028,15 @@ func modifyTags(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if index_ok {
-		old_rule := gFirewallConfig.TagRules[index]
 		gFirewallConfig.TagRules[index] = rule
-
-		FWmtx.Unlock()
-		removeClient("tag", old_rule.Client, old_rule.Tags)
-		FWmtx.Lock()
-
 	} else {
 		gFirewallConfig.TagRules = append(gFirewallConfig.TagRules, rule)
 	}
 	saveFirewallRulesLocked()
+	*changed = true
 }
 
-func modifyGroups(w http.ResponseWriter, r *http.Request) {
-	FWmtx.Lock()
-	defer FWmtx.Unlock()
+func modifyGroups(w http.ResponseWriter, r *http.Request, changed *bool) {
 
 	vars := mux.Vars(r)
 	indexStr, index_ok := vars["index"]
@@ -2042,11 +2079,7 @@ func modifyGroups(w http.ResponseWriter, r *http.Request) {
 			if reflect.DeepEqual(rule, a) {
 				gFirewallConfig.GroupRules = append(gFirewallConfig.GroupRules[:i], gFirewallConfig.GroupRules[i+1:]...)
 				saveFirewallRulesLocked()
-
-				FWmtx.Unlock()
-				//delete the Group for the clients where it applies
-				removeClient("group", rule.Client, rule.Groups)
-				FWmtx.Lock()
+				*changed = true
 				return
 			}
 		}
@@ -2055,17 +2088,12 @@ func modifyGroups(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if index_ok {
-		old_rule := gFirewallConfig.GroupRules[index]
 		gFirewallConfig.GroupRules[index] = rule
-
-		FWmtx.Unlock()
-		removeClient("group", old_rule.Client, old_rule.Groups)
-		FWmtx.Lock()
-
 	} else {
 		gFirewallConfig.GroupRules = append(gFirewallConfig.GroupRules, rule)
 	}
 	saveFirewallRulesLocked()
+	*changed = true
 }
 
 func flushMaps() {
@@ -2089,6 +2117,7 @@ func initPFW() {
 	loadFirewallRules()
 	applySiteVPNs()
 	flushMaps()
+	loadInstalledState()
 	ruleTimer()
 	busListener()
 	runTasks()
@@ -2106,8 +2135,6 @@ func loadInterfacesPublicConfig() []PublicInterfaceConfig {
 }
 
 var outboundIfaceCache = []string{}
-var forwardingClientCache = ""
-var blockClientCache = ""
 
 func collectOutbound() []string {
 	interfaces := loadInterfacesPublicConfig()
@@ -2198,17 +2225,17 @@ func main() {
 
 	unix_plugin_router.HandleFunc("/config", getPFWConfig).Methods("GET")
 	unix_plugin_router.HandleFunc("/topology", pluginGetTopology).Methods("GET")
-	unix_plugin_router.HandleFunc("/block", modifyBlockRules).Methods("DELETE", "PUT")
-	unix_plugin_router.HandleFunc("/block/{index:[0-9]+}", modifyBlockRules).Methods("DELETE", "PUT")
-	unix_plugin_router.HandleFunc("/forward", modifyForwardRules).Methods("DELETE", "PUT")
-	unix_plugin_router.HandleFunc("/forward/{index:[0-9]+}", modifyForwardRules).Methods("DELETE", "PUT")
+	unix_plugin_router.HandleFunc("/block", withConfigMutation(modifyBlockRules)).Methods("DELETE", "PUT")
+	unix_plugin_router.HandleFunc("/block/{index:[0-9]+}", withConfigMutation(modifyBlockRules)).Methods("DELETE", "PUT")
+	unix_plugin_router.HandleFunc("/forward", withConfigMutation(modifyForwardRules)).Methods("DELETE", "PUT")
+	unix_plugin_router.HandleFunc("/forward/{index:[0-9]+}", withConfigMutation(modifyForwardRules)).Methods("DELETE", "PUT")
 	unix_plugin_router.HandleFunc("/variable/{name}", handleVariable).Methods("DELETE", "GET", "PUT")
 	unix_plugin_router.HandleFunc("/testExpression", testExpression).Methods("POST")
 
-	unix_plugin_router.HandleFunc("/tag", modifyTags).Methods("DELETE", "PUT")
-	unix_plugin_router.HandleFunc("/tag/{index:[0-9]+}", modifyTags).Methods("DELETE", "PUT")
-	unix_plugin_router.HandleFunc("/group", modifyGroups).Methods("DELETE", "PUT")
-	unix_plugin_router.HandleFunc("/group/{index:[0-9]+}", modifyGroups).Methods("DELETE", "PUT")
+	unix_plugin_router.HandleFunc("/tag", withConfigMutation(modifyTags)).Methods("DELETE", "PUT")
+	unix_plugin_router.HandleFunc("/tag/{index:[0-9]+}", withConfigMutation(modifyTags)).Methods("DELETE", "PUT")
+	unix_plugin_router.HandleFunc("/group", withConfigMutation(modifyGroups)).Methods("DELETE", "PUT")
+	unix_plugin_router.HandleFunc("/group/{index:[0-9]+}", withConfigMutation(modifyGroups)).Methods("DELETE", "PUT")
 
 	unix_plugin_router.HandleFunc("/sitevpns", modifySiteVPN).Methods("DELETE", "PUT")
 	unix_plugin_router.HandleFunc("/sitevpns/{index:[0-9]+}", modifySiteVPN).Methods("DELETE", "PUT")
