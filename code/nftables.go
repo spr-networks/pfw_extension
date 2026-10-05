@@ -459,6 +459,25 @@ func (c *NFTClient) GetMapElement(family TableFamily, tableName, mapName string,
 	return fmt.Errorf("element not found")
 }
 
+// MapElementKeys returns the keys of every element in a map
+func (c *NFTClient) MapElementKeys(family TableFamily, tableName, mapName string) (map[string]bool, error) {
+	set, err := c.GetMap(family, tableName, mapName)
+	if err != nil {
+		return nil, err
+	}
+
+	elements, err := c.conn.GetSetElements(set)
+	if err != nil {
+		return nil, err
+	}
+
+	keys := make(map[string]bool, len(elements))
+	for _, elem := range elements {
+		keys[string(elem.Key)] = true
+	}
+	return keys, nil
+}
+
 // FlushMap removes all elements from a map
 func (c *NFTClient) FlushMap(family TableFamily, tableName, mapName string) error {
 	set, err := c.GetMap(family, tableName, mapName)

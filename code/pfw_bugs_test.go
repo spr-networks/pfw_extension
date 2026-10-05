@@ -10,9 +10,41 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gorilla/mux"
 )
+
+func TestMain(m *testing.M) {
+	dir, err := os.MkdirTemp("", "pfw-test-state")
+	if err == nil {
+		InstalledStateFile = filepath.Join(dir, "installed.json")
+		FirewallConfigFile = filepath.Join(dir, "rules.json")
+		DevicesPublicConfigFile = filepath.Join(dir, "devices-public.json")
+	}
+	updateDeviceFunc = func(string, DeviceEntry) {}
+	code := m.Run()
+	if err == nil {
+		os.RemoveAll(dir)
+	}
+	os.Exit(code)
+}
+
+func TestQueryKeepsStaleIPsOnFailure(t *testing.T) {
+	domain := "pfw-test-nonexistent-domain.invalid"
+	addr := Address{Domain: domain}
+
+	DNSCachemtx.Lock()
+	DNSCache[domain] = []string{"1.2.3.4"}
+	DNSCacheTime[domain] = time.Now().Add(-time.Minute)
+	DNSCachemtx.Unlock()
+	t.Cleanup(func() { flushDNSCache(addr) })
+
+	ips := resolve(addr)
+	if len(ips) != 1 || ips[0] != "1.2.3.4" {
+		t.Errorf("resolve() after failed lookup = %v, want stale [1.2.3.4]", ips)
+	}
+}
 
 // checkCondition must error, not panic, when a condition is not a boolean
 func TestCheckConditionNonBool(t *testing.T) {
@@ -122,7 +154,7 @@ func TestForwardRuleDstPortValidation(t *testing.T) {
 	FirewallConfigFile = filepath.Join(t.TempDir(), "rules.json")
 
 	router := mux.NewRouter()
-	router.HandleFunc("/forward", modifyForwardRules).Methods("DELETE", "PUT")
+	router.HandleFunc("/forward", withConfigMutation(modifyForwardRules)).Methods("DELETE", "PUT")
 
 	doPut := func(fwd ForwardingRule) int {
 		body, _ := json.Marshal(fwd)

@@ -31,6 +31,10 @@ func (c *NFTClient) GetMapElement(family TableFamily, tableName, mapName string,
 	return errNotSupported
 }
 
+func (c *NFTClient) MapElementKeys(family TableFamily, tableName, mapName string) (map[string]bool, error) {
+	return nil, errNotSupported
+}
+
 func (c *NFTClient) AddMapElementWithTimeout(family TableFamily, tableName, mapName string, key, value []byte, timeout time.Duration) error {
 	return errNotSupported
 }
@@ -112,5 +116,9 @@ func AddInterfaceToSet(setName, iface string) error {
 }
 
 func FlushMapByName(family, tableName, mapName string) error {
+	return errNotSupported
+}
+
+func AddDstSupernetworksAcceptRule(family, tableName, chainName string) error {
 	return errNotSupported
 }

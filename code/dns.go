@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -46,6 +47,7 @@ type QueryRecord struct {
 var DNSCache = map[string][]string{}
 var DNSCacheTime = map[string]time.Time{}
 var DNSTTLCache = map[string][]time.Time{}
+var DNSRegexpCache = map[string]*regexp.Regexp{}
 
 // var domainUpdateQueue = []string{}
 var DNSCachemtx sync.RWMutex
@@ -151,11 +153,13 @@ func updateRegexpCachesLocked(domain string, ips []string, ttls []int) {
 	for cached_name, _ := range DNSCache {
 		is_regexp := cached_name[0] == '/' && len(cached_name) > 2
 		if is_regexp {
-			re, err := regexp.Compile("^" + cached_name[1:len(cached_name)-1] + "$")
-			if err == nil {
-				if re.MatchString(domain) { //slice off trailing dot
-					setTTLAliveIPsLocked(cached_name, ips, ttls)
-				}
+			re, compiled := DNSRegexpCache[cached_name]
+			if !compiled {
+				re, _ = regexp.Compile("^" + cached_name[1:len(cached_name)-1] + "$")
+				DNSRegexpCache[cached_name] = re
+			}
+			if re != nil && re.MatchString(domain) { //slice off trailing dot
+				setTTLAliveIPsLocked(cached_name, ips, ttls)
 			}
 		}
 	}
@@ -276,6 +280,7 @@ func flushDNSCache(addr Address) {
 	delete(DNSCache, addr.Domain)
 	delete(DNSCacheTime, addr.Domain)
 	delete(DNSTTLCache, addr.Domain)
+	delete(DNSRegexpCache, addr.Domain)
 	DNSCachemtx.Unlock()
 }
 
@@ -305,23 +310,39 @@ func isLastDomainLocked(addr Address) bool {
 
 	return is_last
 }
+
+func flushDNSCacheIfLastLocked(addr Address) {
+	if isLastDomainLocked(addr) {
+		flushDNSCache(addr)
+	}
+}
+
 func query(domain string) []string {
 	ips := []string{}
 
-	hosts, err := net.LookupIP(domain)
-	if err != nil {
-		fmt.Println("failed to look up domain "+domain, err)
-	} else {
-		for _, ip := range hosts {
-			ipv4 := ip.To4()
-			if ipv4 != nil {
-				ips = append(ips, ipv4.String())
-			}
-		}
-	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	hosts, err := net.DefaultResolver.LookupIP(ctx, "ip4", domain)
 
 	DNSCachemtx.Lock()
 	defer DNSCachemtx.Unlock()
+
+	if err != nil {
+		fmt.Println("failed to look up domain "+domain, err)
+		DNSCacheTime[domain] = time.Now().Add(30 * time.Second)
+		if prev := DNSCache[domain]; len(prev) != 0 {
+			ips = prev
+		}
+		DNSCache[domain] = ips
+		return ips
+	}
+
+	for _, ip := range hosts {
+		ipv4 := ip.To4()
+		if ipv4 != nil {
+			ips = append(ips, ipv4.String())
+		}
+	}
 
 	DNSCache[domain] = ips
 	//set expiration to current time + refresh interval

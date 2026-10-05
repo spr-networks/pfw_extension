@@ -28,6 +28,37 @@ func nftDump(t *testing.T, args ...string) string {
 	return expiresRe.ReplaceAllString(s, "")
 }
 
+func deleteRuleElements(t *testing.T, refs []nftElemRef) []string {
+	t.Helper()
+	client := GetNFTClient()
+	left := []string{}
+	for _, ref := range refs {
+		client.DeleteMapElementRange(TableFamilyInet, ref.table, ref.mapName, ref.key, ref.keyEnd)
+		if client.GetMapElement(TableFamilyInet, ref.table, ref.mapName, ref.key) == nil {
+			left = append(left, ref.mapName)
+		}
+	}
+	return left
+}
+
+func isForwardingInstalled(fwd ForwardingRule, clientIP string) bool {
+	for _, origDstIP := range resolve(fwd.OriginalDst) {
+		if !allElemRefsPresent(forwardingElemRefs(fwd, clientIP, origDstIP)) {
+			return false
+		}
+	}
+	return true
+}
+
+func isBlockInstalled(br BlockRule, clientIP string) bool {
+	for _, dstIP := range resolve(br.Dst) {
+		if !allElemRefsPresent(blockElemRefs(br, clientIP, dstIP)) {
+			return false
+		}
+	}
+	return true
+}
+
 func nftRun(t *testing.T, args ...string) {
 	t.Helper()
 	if out, err := exec.Command("nft", args...).CombinedOutput(); err != nil {
@@ -280,7 +311,7 @@ func TestBlockRuleRoundTrip(t *testing.T) {
 	if err := addBlock(br, clientIP); err != nil {
 		t.Fatalf("addBlock: %v", err)
 	}
-	t.Cleanup(func() { _ = deleteBlock(br, clientIP, false) })
+	t.Cleanup(func() { deleteRuleElements(t, blockElemRefs(br, clientIP, br.Dst.IP)) })
 
 	if !isBlockInstalled(br, clientIP) {
 		t.Error("isBlockInstalled = false after addBlock")
@@ -289,11 +320,11 @@ func TestBlockRuleRoundTrip(t *testing.T) {
 		t.Error("block element missing goto verdict in kernel state")
 	}
 
-	if err := deleteBlock(br, clientIP, false); err != nil {
-		t.Fatalf("deleteBlock: %v", err)
+	if left := deleteRuleElements(t, blockElemRefs(br, clientIP, br.Dst.IP)); len(left) != 0 {
+		t.Fatalf("element delete left %v", left)
 	}
 	if isBlockInstalled(br, clientIP) {
-		t.Error("isBlockInstalled = true after deleteBlock")
+		t.Error("isBlockInstalled = true after element delete")
 	}
 }
 
@@ -307,16 +338,16 @@ func TestDnatForwardingRoundTrip(t *testing.T) {
 	}
 	const clientIP = "10.99.4.1"
 
-	if isForwardingInstalled(fwd, clientIP, false) {
+	if isForwardingInstalled(fwd, clientIP) {
 		t.Fatal("forwarding unexpectedly installed before add")
 	}
 
-	if err := addForwarding(fwd, clientIP, false); err != nil {
+	if err := addForwarding(fwd, clientIP); err != nil {
 		t.Fatalf("addForwarding: %v", err)
 	}
-	t.Cleanup(func() { _ = deleteForwarding(fwd, clientIP, false, false) })
+	t.Cleanup(func() { deleteRuleElements(t, forwardingElemRefs(fwd, clientIP, "10.99.4.2")) })
 
-	if !isForwardingInstalled(fwd, clientIP, false) {
+	if !isForwardingInstalled(fwd, clientIP) {
 		t.Error("isForwardingInstalled = false after addForwarding")
 	}
 	ipmap := nftDump(t, "list", "map", "inet", "nat", "dnat_tcp_ipmap")
@@ -328,11 +359,11 @@ func TestDnatForwardingRoundTrip(t *testing.T) {
 		t.Errorf("dnat port missing from portmap: %s", portmap)
 	}
 
-	if err := deleteForwarding(fwd, clientIP, false, false); err != nil {
-		t.Fatalf("deleteForwarding: %v", err)
+	if left := deleteRuleElements(t, forwardingElemRefs(fwd, clientIP, "10.99.4.2")); len(left) != 0 {
+		t.Fatalf("element delete left %v", left)
 	}
-	if isForwardingInstalled(fwd, clientIP, false) {
-		t.Error("isForwardingInstalled = true after deleteForwarding")
+	if isForwardingInstalled(fwd, clientIP) {
+		t.Error("isForwardingInstalled = true after element delete")
 	}
 }
 
@@ -421,7 +452,7 @@ func TestBlockRuleRangeRoundTrip(t *testing.T) {
 	if err := addBlock(br, clientIP); err != nil {
 		t.Fatalf("addBlock: %v", err)
 	}
-	t.Cleanup(func() { _ = deleteBlock(br, clientIP, false) })
+	t.Cleanup(func() { deleteRuleElements(t, blockElemRefs(br, clientIP, br.Dst.IP)) })
 
 	if !isBlockInstalled(br, clientIP) {
 		t.Error("isBlockInstalled = false after addBlock")
@@ -431,10 +462,10 @@ func TestBlockRuleRangeRoundTrip(t *testing.T) {
 		t.Errorf("ranged block element not rendered as ranges: %s", listing)
 	}
 
-	if err := deleteBlock(br, clientIP, false); err != nil {
-		t.Fatalf("deleteBlock: %v", err)
+	if left := deleteRuleElements(t, blockElemRefs(br, clientIP, br.Dst.IP)); len(left) != 0 {
+		t.Fatalf("element delete left %v", left)
 	}
 	if isBlockInstalled(br, clientIP) {
-		t.Error("isBlockInstalled = true after deleteBlock")
+		t.Error("isBlockInstalled = true after element delete")
 	}
 }
