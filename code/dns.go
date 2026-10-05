@@ -47,6 +47,7 @@ type QueryRecord struct {
 var DNSCache = map[string][]string{}
 var DNSCacheTime = map[string]time.Time{}
 var DNSTTLCache = map[string][]time.Time{}
+var DNSRegexpCache = map[string]*regexp.Regexp{}
 
 // var domainUpdateQueue = []string{}
 var DNSCachemtx sync.RWMutex
@@ -152,11 +153,13 @@ func updateRegexpCachesLocked(domain string, ips []string, ttls []int) {
 	for cached_name, _ := range DNSCache {
 		is_regexp := cached_name[0] == '/' && len(cached_name) > 2
 		if is_regexp {
-			re, err := regexp.Compile("^" + cached_name[1:len(cached_name)-1] + "$")
-			if err == nil {
-				if re.MatchString(domain) { //slice off trailing dot
-					setTTLAliveIPsLocked(cached_name, ips, ttls)
-				}
+			re, compiled := DNSRegexpCache[cached_name]
+			if !compiled {
+				re, _ = regexp.Compile("^" + cached_name[1:len(cached_name)-1] + "$")
+				DNSRegexpCache[cached_name] = re
+			}
+			if re != nil && re.MatchString(domain) { //slice off trailing dot
+				setTTLAliveIPsLocked(cached_name, ips, ttls)
 			}
 		}
 	}
@@ -277,6 +280,7 @@ func flushDNSCache(addr Address) {
 	delete(DNSCache, addr.Domain)
 	delete(DNSCacheTime, addr.Domain)
 	delete(DNSTTLCache, addr.Domain)
+	delete(DNSRegexpCache, addr.Domain)
 	DNSCachemtx.Unlock()
 }
 

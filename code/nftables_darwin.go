@@ -31,6 +31,10 @@ func (c *NFTClient) GetMapElement(family TableFamily, tableName, mapName string,
 	return errNotSupported
 }
 
+func (c *NFTClient) MapElementKeys(family TableFamily, tableName, mapName string) (map[string]bool, error) {
+	return nil, errNotSupported
+}
+
 func (c *NFTClient) AddMapElementWithTimeout(family TableFamily, tableName, mapName string, key, value []byte, timeout time.Duration) error {
 	return errNotSupported
 }

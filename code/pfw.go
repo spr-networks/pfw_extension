@@ -501,10 +501,47 @@ func forwardingElemRefs(fwd ForwardingRule, clientIP, origDstIP string) []nftEle
 	return []nftElemRef{{"nat", "dnat_" + fwd.Protocol + "_anymap", key, keyEnd}}
 }
 
+// map keys read once per reconcile pass instead of once per element check
+var elemCacheMtx sync.Mutex
+var elemCache map[string]map[string]bool
+
+func setElemCache(enabled bool) {
+	elemCacheMtx.Lock()
+	defer elemCacheMtx.Unlock()
+	if enabled {
+		elemCache = map[string]map[string]bool{}
+	} else {
+		elemCache = nil
+	}
+}
+
+func invalidateElemCache() {
+	elemCacheMtx.Lock()
+	defer elemCacheMtx.Unlock()
+	if elemCache != nil {
+		elemCache = map[string]map[string]bool{}
+	}
+}
+
+func elemRefPresent(client *NFTClient, ref nftElemRef) bool {
+	elemCacheMtx.Lock()
+	defer elemCacheMtx.Unlock()
+	if elemCache == nil {
+		return client.GetMapElement(TableFamilyInet, ref.table, ref.mapName, ref.key) == nil
+	}
+	name := ref.table + "/" + ref.mapName
+	keys, exists := elemCache[name]
+	if !exists {
+		keys, _ = client.MapElementKeys(TableFamilyInet, ref.table, ref.mapName)
+		elemCache[name] = keys
+	}
+	return keys[string(ref.key)]
+}
+
 func allElemRefsPresent(refs []nftElemRef) bool {
 	client := GetNFTClient()
 	for _, ref := range refs {
-		if client.GetMapElement(TableFamilyInet, ref.table, ref.mapName, ref.key) != nil {
+		if !elemRefPresent(client, ref) {
 			return false
 		}
 	}
@@ -515,12 +552,13 @@ func deleteElemRefs(client *NFTClient, refs []nftElemRef) {
 	for _, ref := range refs {
 		client.DeleteMapElementRange(TableFamilyInet, ref.table, ref.mapName, ref.key, ref.keyEnd)
 	}
+	invalidateElemCache()
 }
 
 func anyElemRefPresent(refs []nftElemRef) bool {
 	client := GetNFTClient()
 	for _, ref := range refs {
-		if client.GetMapElement(TableFamilyInet, ref.table, ref.mapName, ref.key) == nil {
+		if elemRefPresent(client, ref) {
 			return true
 		}
 	}
@@ -789,6 +827,9 @@ func reconcileNow() {
 	reconcileMtx.Lock()
 	defer reconcileMtx.Unlock()
 
+	setElemCache(true)
+	defer setElemCache(false)
+
 	cfg := snapshotConfig()
 
 	devices, err := APIDevices()
@@ -949,6 +990,7 @@ func reconcileRules[R any](rules []R, prev map[string]installedRule[R], ops rule
 			if active {
 				if needsInstall(refsFor, resolved) {
 					ops.install(r, clientIP)
+					invalidateElemCache()
 				}
 				set := cloneSet(resolved)
 				for dstIP := range trackedIPs {
