@@ -8,15 +8,15 @@ require (
 	github.com/google/nftables v0.3.1-0.20250714114315-508bb1ffd4a2
 	github.com/gorilla/mux v1.8.1
 	github.com/spr-networks/sprbus-json v0.0.0-20260728202422-08534bc4df3d
-	golang.org/x/net v0.59.0
-	golang.org/x/sys v0.48.0
+	golang.org/x/net v0.61.0
+	golang.org/x/sys v0.49.0
 )
 
 require (
 	github.com/google/go-cmp v0.7.0 // indirect
 	github.com/mdlayher/netlink v1.11.2 // indirect
-	github.com/mdlayher/socket v0.7.0 // indirect
-	github.com/shopspring/decimal v1.5.0 // indirect
+	github.com/mdlayher/socket v0.8.0 // indirect
+	github.com/shopspring/decimal v1.6.0 // indirect
 	github.com/sirupsen/logrus v1.10.2 // indirect
-	golang.org/x/sync v0.23.0 // indirect
+	golang.org/x/sync v0.24.0 // indirect
 )
